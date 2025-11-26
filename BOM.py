@@ -488,14 +488,29 @@ class LayoutApp:
         # Parse below header
         bom = {}
         for r in range(header_row + 1, sheet.max_row + 1):
-            ref = sheet.cell(row=r, column=col_ref).value
-            val = sheet.cell(row=r, column=col_val).value
-            if not ref or not val:
+            ref_cell = sheet.cell(row=r, column=col_ref).value
+            val_cell = sheet.cell(row=r, column=col_val).value
+
+            if not ref_cell or not val_cell:
                 continue
 
-            ref = str(ref).strip()
-            val = str(val).strip()
-            bom[ref] = val
+            ref_list_raw = str(ref_cell).strip()
+            val = str(val_cell).strip()
+
+            # Split multi-part references: commas, spaces, slashes
+            refs = (
+                ref_list_raw
+                .replace(";", ",")
+                .replace("/", ",")
+                .replace(" ", ",")
+                .split(",")
+            )
+
+            for ref in refs:
+                ref = ref.strip()
+                if ref:
+                    bom[ref] = val
+
 
         return bom
 
