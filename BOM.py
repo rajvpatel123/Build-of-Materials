@@ -1,72 +1,57 @@
 import csv
 import math
 import tkinter as tk
-from tkinter import filedialog, ttk, messagebox
-from PIL import Image, ImageTk
-from io import BytesIO
-from pdf2image import convert_from_path
+from tkinter import ttk, filedialog, messagebox
+from openpyxl import load_workbook, Workbook
+
 
 # ============================================================
-# Component Box Class
+# CHECK VALUE+UNIT MATCH
+# ============================================================
+
+def values_match(v1, u1, v2, u2):
+    return str(v1).strip() == str(v2).strip() and str(u1).strip() == str(u2).strip()
+
+
+# ============================================================
+# COMPONENT BOX CLASS
 # ============================================================
 
 class ComponentBox:
-    """A rectangular component drawn on the canvas with rotation + values."""
+    def __init__(self, canvas, ref, x, y, angle,
+                 comp_type="Unknown", value="", unit="", highlight=None):
 
-    def __init__(self, canvas, ref, x, y, angle, comp_type="Unknown", value="", unit=""):
         self.canvas = canvas
         self.ref = ref
         self.x = x
         self.y = y
         self.angle = float(angle)
-
-        # Auto-detect type + default units
-        first = ref[0].upper()
-        if first == "C":
-            self.comp_type = "Capacitor"
-            self.unit = unit if unit else "nF"
-        elif first == "R":
-            self.comp_type = "Resistor"
-            self.unit = unit if unit else "Ohms"
-        elif first == "L":
-            self.comp_type = "Inductor"
-            self.unit = unit if unit else "nH"
-        else:
-            self.comp_type = comp_type
-            self.unit = unit if unit else ""
-
+        self.comp_type = comp_type
         self.value = value
+        self.unit = unit
+        self.highlight = highlight
 
         self.width = 60
         self.height = 20
 
         self.rect = None
         self.label = None
-
         self.draw()
         self.bind_events()
 
-    # ---------------------------------------------------------
-    # Label formatting
-    # ---------------------------------------------------------
     def formatted_label(self):
         if self.value and self.unit:
             return f"{self.ref} {self.value}{self.unit}"
+        elif self.value:
+            return f"{self.ref} {self.value}"
         return self.ref
 
-    # ---------------------------------------------------------
-    # Drawing component
-    # ---------------------------------------------------------
     def draw(self):
         w = self.width / 2
         h = self.height / 2
 
-        # Rectangle before rotation
         corners = [
-            (-w, -h),
-            ( w, -h),
-            ( w,  h),
-            (-w,  h)
+            (-w, -h), (w, -h), (w, h), (-w, h)
         ]
 
         theta = math.radians(self.angle)
@@ -77,16 +62,18 @@ class ComponentBox:
             ry = cx * math.sin(theta) + cy * math.cos(theta)
             rotated.append((self.x + rx, self.y + ry))
 
-        points = [p for xy in rotated for p in xy]
+        points = [p for pt in rotated for p in pt]
 
-        self.rect = self.canvas.create_polygon(
-            points,
-            fill="lightblue",
-            outline="black",
-            width=2
-        )
+        if self.highlight == "missing":
+            color = "red"
+        elif self.highlight == "mismatch":
+            color = "yellow"
+        else:
+            color = "lightblue"
 
-        # Smart label placement
+        self.rect = self.canvas.create_polygon(points, fill=color, outline="black", width=2)
+
+        # Label placement
         angle = self.angle % 360
         offset = 6
         side_offset = 12
@@ -96,19 +83,12 @@ class ComponentBox:
         elif 45 <= angle < 135:
             lx, ly = self.x, self.y + 30 + offset
         elif 135 <= angle < 225:
-            lx, ly = self.x, self.y + h + offset
+            lx, ly = self.x, self.y - h - offset
         else:
-            lx, ly = self.x, self.y + 30 + offset
+            lx, ly = self.x - w - side_offset, self.y
 
-        self.label = self.canvas.create_text(
-            lx, ly,
-            text=self.formatted_label(),
-            font=("Arial", 9)
-        )
+        self.label = self.canvas.create_text(lx, ly, text=self.formatted_label(), font=("Arial", 9))
 
-    # ---------------------------------------------------------
-    # Right-click pop-up editor
-    # ---------------------------------------------------------
     def bind_events(self):
         for tag in (self.rect, self.label):
             self.canvas.tag_bind(tag, "<Button-3>", self.right_click)
@@ -117,580 +97,632 @@ class ComponentBox:
         popup = tk.Toplevel()
         popup.title(f"Edit {self.ref}")
 
-        tk.Label(popup, text=f"Reference: {self.ref}", font=("Arial", 12)).pack(pady=5)
+        tk.Label(popup, text=f"Reference: {self.ref}").pack(pady=5)
 
-        tk.Label(popup, text="Component Type:").pack()
-        type_box = ttk.Combobox(
-            popup,
-            values=["Resistor", "Capacitor", "Inductor", "Unknown"]
-        )
-        type_box.set(self.comp_type)
-        type_box.pack(pady=5)
+        tk.Label(popup, text="Value:").pack()
+        val_entry = tk.Entry(popup)
+        val_entry.insert(0, self.value)
+        val_entry.pack()
 
-        tk.Label(popup, text="Value (numeric):").pack()
-        value_entry = tk.Entry(popup)
-        value_entry.insert(0, self.value)
-        value_entry.pack(pady=5)
-
-        tk.Label(popup, text="Units:").pack()
-        unit_box = ttk.Combobox(
-            popup,
-            values=["pF", "nF", "uF", "pH", "nH", "Ohms"]
-        )
+        tk.Label(popup, text="Unit:").pack()
+        unit_box = ttk.Combobox(popup, values=["pF", "nF", "uF", "pH", "nH", "Ohms"])
         unit_box.set(self.unit)
-        unit_box.pack(pady=5)
+        unit_box.pack()
 
-        tk.Label(popup, text="Rotation Angle (deg):").pack()
-        angle_entry = tk.Entry(popup)
-        angle_entry.insert(0, str(self.angle))
-        angle_entry.pack(pady=5)
+        tk.Label(popup, text="Angle:").pack()
+        ang_entry = tk.Entry(popup)
+        ang_entry.insert(0, str(self.angle))
+        ang_entry.pack()
 
-        def save_changes():
-            self.comp_type = type_box.get()
-            self.value = value_entry.get()
+        def save():
+            self.value = val_entry.get()
             self.unit = unit_box.get()
-            self.angle = float(angle_entry.get())
+            self.angle = float(ang_entry.get())
 
             self.canvas.delete(self.rect)
             self.canvas.delete(self.label)
             self.draw()
             self.bind_events()
-
             popup.destroy()
 
-        tk.Button(popup, text="Save Changes", command=save_changes).pack(pady=10)
+        tk.Button(popup, text="Save", command=save).pack(pady=10)
+
 
 # ============================================================
-# Layout Application
+# MAIN APPLICATION
 # ============================================================
 
 class LayoutApp:
-
     def __init__(self, root):
         self.root = root
-        self.root.title("Chipset Layout Editor")
+        self.root.title("Chipset BOM + XY Layout Tool")
 
-        self.components = []
-        self.file_a = {}
-        self.file_b = {}
-        self.view_mode = "A"
+        self.xy_data = {}
+        self.tuning_boms = []
+        self.tuning_bom_names = []
+        self.production_bom = None
+        self.production_bom_headers = None
 
-        self.underlay_img = None
-        self.underlay_canvas_img = None
-        self.underlay_scale = 1.0
-        self.underlay_offset_x = 0
-        self.underlay_offset_y = 0
-        self.underlay_opacity = 1.0
+        self.scale_factor = 100  # fixed
 
-        self.layout_scale = 1.0  # NEW for spreading components
-
-        # ============================================================
-        # TOP BUTTON BAR
-        # ============================================================
         top = tk.Frame(root)
-        top.pack(fill="x", pady=5)
+        top.pack(fill="x")
 
-        tk.Button(top, text="Load File A", command=self.load_file_a).pack(side="left", padx=10)
-        tk.Button(top, text="Load File B", command=self.load_file_b).pack(side="left", padx=10)
-        tk.Button(top, text="Save File A", command=self.save_file_a).pack(side="left", padx=10)
-        tk.Button(top, text="Save File B", command=self.save_file_b).pack(side="left", padx=10)
+        tk.Button(top, text="Load XY File", command=self.load_xy_file).pack(side="left", padx=5)
+        tk.Button(top, text="Load Production BOM", command=self.load_production_bom).pack(side="left", padx=5)
+        tk.Button(top, text="Export Production BOM", command=self.export_production_bom).pack(side="left", padx=5)
 
-        tk.Button(top, text="Toggle A/B", command=self.toggle_view).pack(side="left", padx=10)
-        tk.Button(top, text="Show Differences", command=self.show_differences).pack(side="left", padx=10)
-        tk.Button(top, text="Load PDF Underlay", command=self.load_pdf_underlay).pack(side="left", padx=10)
-        tk.Button(top, text="Clear", command=self.clear_canvas).pack(side="left", padx=10)
+        tk.Button(top, text="Load Tuning BOM", command=self.load_tuning_bom_csv).pack(side="left", padx=5)
+        tk.Button(top, text="Apply Selected Tuning BOM", command=self.apply_selected_tuning_bom).pack(side="left", padx=5)
+        tk.Button(top, text="Save Tuning BOM", command=self.save_tuning_bom_csv).pack(side="left", padx=5)
+        tk.Button(top, text="Compare Tuning BOMs", command=self.compare_tuning_boms).pack(side="left", padx=5)
 
-        # ============================================================
-        # LEFT SIDEBAR
-        # ============================================================
-        sidebar = tk.Frame(root, width=260, bg="#e5e5e5")
-        sidebar.pack(side="left", fill="y")
-
-        tk.Label(sidebar, text="PDF Controls", bg="#e5e5e5", font=("Arial", 12, "bold")).pack(pady=5)
-
-        tk.Label(sidebar, text="Scale").pack()
-        self.scale_slider = tk.Scale(
-            sidebar, from_=0.1, to=4.0, resolution=0.05,
-            orient="horizontal",
-            command=lambda v: self.update_underlay()
-        )
-        self.scale_slider.set(1.0)
-        self.scale_slider.pack(fill="x")
-
-        tk.Label(sidebar, text="Offset X").pack()
-        self.offset_x_slider = tk.Scale(
-            sidebar, from_=-1000, to=1000, resolution=1,
-            orient="horizontal",
-            command=lambda v: self.update_underlay()
-        )
-        self.offset_x_slider.set(0)
-        self.offset_x_slider.pack(fill="x")
-
-        tk.Label(sidebar, text="Offset Y").pack()
-        self.offset_y_slider = tk.Scale(
-            sidebar, from_=-1000, to=1000, resolution=1,
-            orient="horizontal",
-            command=lambda v: self.update_underlay()
-        )
-        self.offset_y_slider.set(0)
-        self.offset_y_slider.pack(fill="x")
-
-        tk.Label(sidebar, text="Opacity").pack()
-        self.opacity_slider = tk.Scale(
-            sidebar, from_=0.1, to=1.0, resolution=0.05,
-            orient="horizontal",
-            command=lambda v: self.update_underlay()
-        )
-        self.opacity_slider.set(1.0)
-        self.opacity_slider.pack(fill="x")
-
-        # ============================================================
-        # NEW LAYOUT SCALE SLIDER
-        # ============================================================
-        tk.Label(sidebar, text="Layout Scale", bg="#e5e5e5", font=("Arial", 12, "bold")).pack(pady=(15,0))
-
-        self.layout_scale_slider = tk.Scale(
-            sidebar,
-            from_=0.5,
-            to=10.0,
-            resolution=0.1,
-            orient="horizontal",
-            command=lambda v: self.on_layout_scale_changed()
-        )
-        self.layout_scale_slider.set(1.0)
-        self.layout_scale_slider.pack(fill="x", padx=5, pady=5)
-
-        # ============================================================
-        # MAIN CANVAS
-        # ============================================================
-        self.canvas = tk.Canvas(root, width=1400, height=900, bg="white")
+        self.canvas = tk.Canvas(root, width=1500, height=900, bg="white")
         self.canvas.pack(fill="both", expand=True)
+    # ============================================================
+    # AUTO-UNIT ASSIGNER
+    # ============================================================
+
+    def auto_default_unit(self, ref, unit):
+        """If a component has a value but no unit, auto-infer one."""
+        if unit not in ["", None]:
+            return unit
+
+        r = ref.upper()
+        if r.startswith("C"):
+            return "nF"
+        if r.startswith("R"):
+            return "Ohms"
+        if r.startswith("L"):
+            return "nH"
+        return ""
+
 
     # ============================================================
-    # CALLBACK: LAYOUT SCALE
+    # LOAD XY FILE (CSV) — SCALE = 100
     # ============================================================
-    def on_layout_scale_changed(self):
-        self.layout_scale = float(self.layout_scale_slider.get())
-        self.redraw()
 
-    # ============================================================
-    # CLEAR CANVAS
-    # ============================================================
-    def clear_canvas(self):
-        self.canvas.delete("all")
-        self.components = []
+    def load_xy_file(self):
+        fp = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
+        if not fp:
+            return
 
-    # ============================================================
-    # PARSE CSV (safe loader)
-    # ============================================================
-    def parse_csv(self, filepath):
         data = {}
         try:
-            with open(filepath, "r", encoding="utf-8-sig") as f:
+            with open(fp, newline="", encoding="utf-8-sig") as f:
                 reader = csv.DictReader(f)
+
                 for row in reader:
-                    ref = row.get("ReferenceID") or row.get("Reference") or row.get("Ref") or ""
+                    ref = (
+                        row.get("ReferenceID")
+                        or row.get("Reference")
+                        or row.get("Ref")
+                        or row.get("Designator")
+                        or ""
+                    ).strip()
+
                     if not ref:
                         continue
 
                     try:
-                        x = float(row.get("X", ""))
-                        y = float(row.get("Y", ""))
+                        x = float(row.get("X", "").strip())
+                        y = float(row.get("Y", "").strip())
+                        angle = float(row.get("Angle", "0").strip())
                     except:
                         continue
 
-                    try:
-                        angle = float(row.get("Angle", "0"))
-                    except:
-                        angle = 0
+                    x *= self.scale_factor
+                    y *= self.scale_factor
 
                     data[ref] = {
+                        "ref": ref,
                         "x": x,
                         "y": y,
                         "angle": angle,
-                        "value": row.get("Value", ""),
-                        "unit": row.get("Unit", ""),
+                        "value": "",
+                        "unit": "",
                         "comp_type": self.detect_type(ref),
                     }
+
         except Exception as e:
-            messagebox.showerror("Error", str(e))
-            return {}
+            messagebox.showerror("Error", f"Failed to load XY file:\n{e}")
+            return
 
-        return data
+        self.xy_data = data
+        messagebox.showinfo("Loaded", "XY file loaded.")
+        self.redraw()
+
 
     # ============================================================
-    # TYPE DETECTION BASED ON REFERENCE PREFIX
+    # DETECT COMPONENT TYPE
     # ============================================================
+
     def detect_type(self, ref):
-        if not ref:
-            return "Unknown"
-        first = ref[0].upper()
-        if first == "C":
+        r = ref.upper()
+        if r.startswith("C"):
             return "Capacitor"
-        if first == "R":
+        if r.startswith("R"):
             return "Resistor"
-        if first == "L":
+        if r.startswith("L"):
             return "Inductor"
         return "Unknown"
 
-    # ============================================================
-    # FILE A LOADER (CSV + XLSX MERGE)
-    # ============================================================
-    def load_file_a(self):
-        # 1) Load XY CSV
-        fp_csv = filedialog.askopenfilename(
-            title="Select File A XY CSV",
-            filetypes=[("CSV Files", "*.csv")]
-        )
-        if not fp_csv:
-            return
-
-        file_a_xy = self.parse_csv(fp_csv)
-        if not file_a_xy:
-            messagebox.showerror("Error", "Invalid XY CSV.")
-            return
-
-        # 2) Load XLSX BOM
-        fp_xlsx = filedialog.askopenfilename(
-            title="Select BOM XLSX",
-            filetypes=[("Excel Files", "*.xlsx")]
-        )
-        if not fp_xlsx:
-            messagebox.showerror("Error", "BOM XLSX required.")
-            return
-
-        bom_data = self.load_bom_xlsx(fp_xlsx)
-
-        # 3) Merge BOM into XY
-        for ref, info in file_a_xy.items():
-            if ref in bom_data:
-                raw_value = bom_data[ref]
-                numeric, unit = self.parse_engineering_value(raw_value, info["comp_type"])
-                if numeric is not None:
-                    info["value"] = numeric
-                if unit:
-                    info["unit"] = unit
-
-        # Save
-        self.file_a = file_a_xy
-        self.view_mode = "A"
-        self.redraw()
-
-        messagebox.showinfo("Loaded", "File A loaded with XY + BOM successfully.")
 
     # ============================================================
-    # LOAD FILE B (CSV ONLY)
+    # LOAD PRODUCTION BOM
     # ============================================================
-    def load_file_b(self):
-        fp = filedialog.askopenfilename(
-            title="Select File B CSV",
-            filetypes=[("CSV Files", "*.csv")]
-        )
+
+    def load_production_bom(self):
+        fp = filedialog.askopenfilename(filetypes=[("Excel Files", "*.xlsx")])
         if not fp:
             return
-        self.file_b = self.parse_csv(fp)
-        self.view_mode = "B"
+
+        bom, headers = self.parse_production_bom(fp)
+        if bom is None:
+            return
+
+        self.production_bom = bom
+        self.production_bom_headers = headers
+
+        # Apply to workspace immediately
+        for ref, info in self.xy_data.items():
+            if ref in self.production_bom:
+                bval = self.production_bom[ref]["value"]
+                bunt = self.production_bom[ref]["unit"]
+
+                if bval:
+                    info["value"] = bval
+                if bunt:
+                    info["unit"] = bunt
+
+        messagebox.showinfo("Loaded", "Production BOM applied.")
         self.redraw()
 
+
     # ============================================================
-    # SAVE FILE A
+    # EXPORT PRODUCTION BOM
     # ============================================================
-    def save_file_a(self):
-        if not self.file_a:
+
+    def export_production_bom(self):
+        if not self.production_bom:
+            messagebox.showerror("Error", "No production BOM loaded.")
             return
 
         save_path = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV Files", "*.csv")],
-            title="Save File A"
+            defaultextension=".xlsx",
+            filetypes=[("Excel Files", "*.xlsx")],
+            title="Export Production BOM"
         )
         if not save_path:
             return
 
-        with open(save_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["ReferenceID", "X", "Y", "Angle", "Value", "Unit"])
-            for ref, v in self.file_a.items():
-                writer.writerow([
-                    ref,
-                    round(v["x"], 4),
-                    round(v["y"], 4),
-                    v["angle"],
-                    v["value"],
-                    v["unit"]
-                ])
+        wb = Workbook()
+        ws = wb.active
 
-        print("File A saved:", save_path)
+        # Write headers
+        for c, header in enumerate(self.production_bom_headers, start=1):
+            ws.cell(row=1, column=c, value=header)
 
-    # ============================================================
-    # SAVE FILE B
-    # ============================================================
-    def save_file_b(self):
-        if not self.file_b:
-            return
+        try:
+            col_ref = self.production_bom_headers.index("Reference Designator") + 1
+        except:
+            col_ref = 1
 
-        save_path = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV Files", "*.csv")],
-            title="Save File B"
-        )
-        if not save_path:
-            return
+        try:
+            col_val = self.production_bom_headers.index("Value") + 1
+        except:
+            col_val = 2
 
-        with open(save_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["ReferenceID", "X", "Y", "Angle", "Value", "Unit"])
-            for ref, v in self.file_b.items():
-                writer.writerow([
-                    ref,
-                    round(v["x"], 4),
-                    round(v["y"], 4),
-                    v["angle"],
-                    v["value"],
-                    v["unit"]
-                ])
+        try:
+            col_unit = self.production_bom_headers.index("Unit") + 1
+        except:
+            col_unit = 3
 
-        print("File B saved:", save_path)
+        row = 2
+        for ref, d in self.production_bom.items():
+            ws.cell(row=row, column=col_ref, value=ref)
+            ws.cell(row=row, column=col_val, value=d.get("value", ""))
+            ws.cell(row=row, column=col_unit, value=d.get("unit", ""))
+            row += 1
+
+        wb.save(save_path)
+        messagebox.showinfo("Saved", f"Production BOM exported:\n{save_path}")
+
 
     # ============================================================
-    # XLSX BOM LOADER (Auto detect header)
+    # PARSE PRODUCTION BOM (FULL FIXED VERSION)
     # ============================================================
-    def load_bom_xlsx(self, filepath):
-        from openpyxl import load_workbook
 
-        wb = load_workbook(filepath, data_only=True)
-        sheet = wb.active
+    def parse_production_bom(self, filepath):
+        """
+        FIXED parser:
+        - Detects header row automatically
+        - Splits multi-reference cells
+        - Safely removes quantities (no crash)
+        - 0 = missing
+        - Auto unit assignment for missing unit
+        """
+        try:
+            wb = load_workbook(filepath, data_only=True)
+            ws = wb.active
+        except Exception as e:
+            messagebox.showerror("Error", f"Cannot open file:\n{e}")
+            return None, None
+
+        REF_KEYS = ["reference designator"]
+        VALUE_KEYS = ["value"]
+        UNIT_KEYS = ["unit", "units"]
 
         header_row = None
-        col_ref = None
-        col_val = None
+        col_ref = col_val = col_unit = None
 
-        # Scan first 20 rows for header
-        for r in range(1, 21):
-            row_values = []
-            for c in range(1, sheet.max_column + 1):
-                cell = sheet.cell(row=r, column=c).value
-                if cell:
-                    row_values.append((c, str(cell).strip().lower()))
+        # Detect header row
+        for r in range(1, 60):
+            row_vals = [
+                (c, str(ws.cell(r, c).value).strip().lower())
+                for c in range(1, ws.max_column + 1)
+                if ws.cell(r, c).value
+            ]
 
-            columns = {text: col for col, text in row_values}
+            possible_ref = [c for c, t in row_vals if any(k in t for k in REF_KEYS)]
+            possible_val = [c for c, t in row_vals if any(k in t for k in VALUE_KEYS)]
 
-            if "reference designator" in columns and "value" in columns:
+            if possible_ref and possible_val:
                 header_row = r
-                col_ref = columns["reference designator"]
-                col_val = columns["value"]
+                col_ref = possible_ref[0]
+                col_val = possible_val[0]
+
+                for c, t in row_vals:
+                    if any(k in t for k in UNIT_KEYS):
+                        col_unit = c
+
                 break
 
-        if header_row is None:
-            messagebox.showerror("Error", "Could not find header row with Reference Designator + Value")
-            return {}
+        if not header_row:
+            messagebox.showerror("Error", "Could not find BOM header row.")
+            return None, None
 
-        # Parse below header
+        # Extract headers
+        headers = [
+            ws.cell(header_row, c).value or ""
+            for c in range(1, ws.max_column + 1)
+        ]
+
         bom = {}
-        for r in range(header_row + 1, sheet.max_row + 1):
-            ref_cell = sheet.cell(row=r, column=col_ref).value
-            val_cell = sheet.cell(row=r, column=col_val).value
 
-            if not ref_cell or not val_cell:
+        for r in range(header_row + 1, ws.max_row + 1):
+            ref_cell = ws.cell(r, col_ref).value
+            val_cell = ws.cell(r, col_val).value
+            unit_cell = ws.cell(r, col_unit).value if col_unit else ""
+
+            if not ref_cell:
                 continue
 
-            ref_list_raw = str(ref_cell).strip()
-            val = str(val_cell).strip()
-
-            # Split multi-part references: commas, spaces, slashes
+            # Split C10, C11, C12 into separate entries
             refs = (
-                ref_list_raw
+                str(ref_cell)
                 .replace(";", ",")
                 .replace("/", ",")
                 .replace(" ", ",")
                 .split(",")
             )
 
+            # Safe value extraction
+            raw_val_str = str(val_cell).strip() if val_cell else ""
+            parts = raw_val_str.split()
+            raw_val_str = parts[0] if parts else ""
+
+            numeric = self.extract_numeric(raw_val_str)
+            unit = self.extract_unit(raw_val_str, unit_cell)
+
+            if numeric == "0":
+                numeric = ""
+                unit = ""
+            else:
+                unit = self.auto_default_unit(refs[0], unit)
+
             for ref in refs:
                 ref = ref.strip()
-                if ref:
-                    bom[ref] = val
+                if not ref:
+                    continue
 
+                bom[ref] = {"value": numeric, "unit": unit}
 
-        return bom
+        return bom, headers
+    # ============================================================
+    # EXTRACT NUMERIC + UNIT HELPERS
+    # ============================================================
+
+    def extract_numeric(self, raw):
+        if raw in ["", None]:
+            return ""
+        s = str(raw).lower().replace(" ", "")
+        out = ""
+        for ch in s:
+            if ch.isdigit() or ch == ".":
+                out += ch
+        return out
+
+    def extract_unit(self, raw, explicit_unit):
+        if explicit_unit not in ["", None]:
+            return explicit_unit
+
+        if raw in ["", None]:
+            return ""
+
+        s = str(raw).lower()
+
+        if "pf" in s:
+            return "pF"
+        if "nf" in s:
+            return "nF"
+        if "uf" in s or "μf" in s:
+            return "uF"
+        if "nh" in s:
+            return "nH"
+        if "uh" in s or "μh" in s:
+            return "uH"
+        if "ohm" in s or s.endswith("r"):
+            return "Ohms"
+
+        return ""
+
 
     # ============================================================
-    # ENGINEERING VALUE PARSER
+    # LOAD TUNING BOM (CSV)
     # ============================================================
-    def parse_engineering_value(self, raw, comp_type):
-        if not raw:
-            return None, None
 
-        raw = str(raw).strip().replace(" ", "").lower()
-
-        if comp_type == "Capacitor":
-            if raw.endswith("pf"):
-                return float(raw[:-2]), "pF"
-            if raw.endswith("nf"):
-                return float(raw[:-2]), "nF"
-            if raw.endswith("uf"):
-                return float(raw[:-2]), "uF"
-            if raw.replace(".", "").isdigit():
-                return float(raw), "nF"
-            return None, None
-
-        if comp_type == "Resistor":
-            if "k" in raw:
-                return float(raw.replace("k", "")) * 1000, "Ohms"
-            if "r" in raw:
-                return float(raw.replace("r", "")), "Ohms"
-            if raw.replace(".", "").isdigit():
-                return float(raw), "Ohms"
-            return None, None
-
-        if comp_type == "Inductor":
-            if raw.endswith("nh"):
-                return float(raw[:-2]), "nH"
-            if raw.endswith("uh"):
-                return float(raw[:-2]), "uH"
-            if raw.replace(".", "").isdigit():
-                return float(raw), "nH"
-            return None, None
-
-        return None, None
-
-    # ============================================================
-    # TOGGLE VIEW
-    # ============================================================
-    def toggle_view(self):
-        self.view_mode = "B" if self.view_mode == "A" else "A"
-        self.redraw()
-
-    # ============================================================
-    # REDRAW LAYOUT (with layout_scale)
-    # ============================================================
-    def redraw(self):
-        self.canvas.delete("all")
-
-        data = self.file_a if self.view_mode == "A" else self.file_b
-        if not data:
+    def load_tuning_bom_csv(self):
+        fp = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
+        if not fp:
             return
 
-        xs = [v["x"] for v in data.values()]
-        ys = [v["y"] for v in data.values()]
-
-        min_x, max_x = min(xs), max(xs)
-        min_y, max_y = min(ys), max(ys)
-
-        w = max_x - min_x
-        h = max_y - min_y
-
-        # Prevent tiny layouts → smush fix
-        min_layout_size = 50
-        if w < min_layout_size:
-            w = min_layout_size
-        if h < min_layout_size:
-            h = min_layout_size
-
-        cw = self.canvas.winfo_width()
-        ch = self.canvas.winfo_height()
-
-        sx = (cw - 200) / w
-        sy = (ch - 200) / h
-        scale = min(sx, sy)
-
-        padding = 100
-
-        for ref, info in data.items():
-            x = (info["x"] - min_x) * scale * self.layout_scale + padding
-            y = (info["y"] - min_y) * scale * self.layout_scale + padding
-
-            comp = ComponentBox(
-                self.canvas, ref, x, y, info["angle"],
-                comp_type=info["comp_type"],
-                value=info["value"],
-                unit=info["unit"]
-            )
-            self.components.append(comp)
-
-        # Draw underlay on top
-        self.update_underlay()
-
-    # ============================================================
-    # SHOW DIFFERENCES
-    # ============================================================
-    def show_differences(self):
-        if not self.file_a or not self.file_b:
-            messagebox.showerror("Error", "Load File A and File B first.")
-            return
-
-        diff_window = tk.Toplevel()
-        diff_window.title("Differences")
-
-        tree = ttk.Treeview(diff_window, columns=("oldV", "newV", "oldU", "newU"), show="headings")
-        tree.pack(fill="both", expand=True)
-
-        tree.heading("oldV", text="Old Value")
-        tree.heading("newV", text="New Value")
-        tree.heading("oldU", text="Old Unit")
-        tree.heading("newU", text="New Unit")
-
-        for ref in self.file_a:
-            if ref not in self.file_b:
-                continue
-
-            a = self.file_a[ref]
-            b = self.file_b[ref]
-
-            if a["value"] != b["value"] or a["unit"] != b["unit"]:
-                tree.insert("", "end", values=(a["value"], b["value"], a["unit"], b["unit"]))
-
-    # ============================================================
-    # PDF UNDERLAY
-    # ============================================================
-    def load_pdf_underlay(self):
-        path = filedialog.askopenfilename(filetypes=[("PDF Files", "*.pdf")])
-        if not path:
-            return
+        tuning = {}
 
         try:
-            images = convert_from_path(path, dpi=200, first_page=1, last_page=1)
-            img = images[0]
+            with open(fp, newline="", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+
+                for row in reader:
+                    ref = (
+                        row.get("ReferenceID")
+                        or row.get("Reference")
+                        or row.get("Ref")
+                        or ""
+                    ).strip()
+
+                    if not ref:
+                        continue
+
+                    raw_val = (row.get("Value") or "").strip()
+                    raw_unit = (row.get("Unit") or "").strip()
+
+                    # Safe split
+                    parts = raw_val.split()
+                    raw_val = parts[0] if parts else ""
+
+                    numeric = self.extract_numeric(raw_val)
+                    unit = self.extract_unit(raw_val, raw_unit)
+
+                    # Zero = missing
+                    if numeric == "0":
+                        numeric = ""
+                        unit = ""
+                    else:
+                        unit = self.auto_default_unit(ref, unit)
+
+                    tuning[ref] = {
+                        "value": numeric,
+                        "unit": unit,
+                    }
+
         except Exception as e:
-            messagebox.showerror("Error", str(e))
+            messagebox.showerror("Error", f"Failed to load tuning BOM:\n{e}")
             return
 
-        self.underlay_img_original = img.convert("RGBA")
-        self.update_underlay()
+        self.tuning_boms.append(tuning)
+        self.tuning_bom_names.append(fp)
+        messagebox.showinfo("Loaded", f"Tuning BOM loaded:\n{fp}")
 
-    def update_underlay(self):
-        self.canvas.delete("UNDERLAY")
 
-        if not hasattr(self, "underlay_img_original"):
+    # ============================================================
+    # SAVE TUNING BOM (CSV)
+    # ============================================================
+
+    def save_tuning_bom_csv(self):
+        if not self.xy_data:
+            messagebox.showerror("Error", "Load XY file first.")
             return
 
-        scale = self.scale_slider.get()
-        ox = self.offset_x_slider.get()
-        oy = self.offset_y_slider.get()
-        op = self.opacity_slider.get()
-
-        img = self.underlay_img_original.resize(
-            (int(self.underlay_img_original.width * scale),
-             int(self.underlay_img_original.height * scale)),
-            Image.LANCZOS
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV Files", "*.csv")],
+            title="Save Tuning BOM"
         )
+        if not save_path:
+            return
 
-        alpha = img.split()[3]
-        alpha = alpha.point(lambda p: int(p * op))
-        img.putalpha(alpha)
+        with open(save_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["ReferenceID", "X", "Y", "Angle", "Value", "Unit"])
 
-        self.underlay_img = ImageTk.PhotoImage(img)
+            for ref, info in self.xy_data.items():
+                writer.writerow([
+                    ref,
+                    info["x"] / self.scale_factor,
+                    info["y"] / self.scale_factor,
+                    info["angle"],
+                    info.get("value", ""),
+                    info.get("unit", ""),
+                ])
 
-        self.canvas.create_image(
-            ox, oy,
-            image=self.underlay_img,
-            anchor="nw",
-            tags="UNDERLAY"
+        messagebox.showinfo("Saved", f"Tuning BOM saved:\n{save_path}")
+
+
+    # ============================================================
+    # APPLY SELECTED TUNING BOM
+    # ============================================================
+
+    def apply_selected_tuning_bom(self):
+        if not self.tuning_boms:
+            messagebox.showerror("Error", "No tuning BOMs loaded.")
+            return
+
+        win = tk.Toplevel()
+        win.title("Apply Tuning BOM")
+
+        tk.Label(win, text="Choose tuning BOM:").pack()
+
+        names = [
+            f"Tuning {i+1}: {self.tuning_bom_names[i]}"
+            for i in range(len(self.tuning_boms))
+        ]
+
+        sel = tk.StringVar()
+        box = ttk.Combobox(win, textvariable=sel, values=names, width=60)
+        box.pack()
+        box.current(0)
+
+        def do_apply():
+            bom = self.tuning_boms[box.current()]
+
+            for ref, info in self.xy_data.items():
+                if ref in bom:
+                    info["value"] = bom[ref]["value"]
+                    info["unit"] = bom[ref]["unit"]
+
+            win.destroy()
+            self.redraw()
+
+        tk.Button(win, text="Apply", command=do_apply).pack(pady=10)
+
+
+    # ============================================================
+    # COMPARE TUNING BOMs
+    # ============================================================
+
+    def compare_tuning_boms(self):
+        if len(self.tuning_boms) < 2:
+            messagebox.showerror("Error", "Load at least 2 tuning BOMs.")
+            return
+
+        win = tk.Toplevel()
+        win.title("Compare Tuning BOMs")
+
+        names = [
+            f"Tuning {i+1}: {self.tuning_bom_names[i]}"
+            for i in range(len(self.tuning_boms))
+        ]
+
+        tk.Label(win, text="Select BOM A:").pack()
+        selA = tk.StringVar()
+        comboA = ttk.Combobox(win, textvariable=selA, values=names, width=60)
+        comboA.pack()
+        comboA.current(0)
+
+        tk.Label(win, text="Select BOM B:").pack()
+        selB = tk.StringVar()
+        comboB = ttk.Combobox(win, textvariable=selB, values=names, width=60)
+        comboB.pack()
+        comboB.current(1)
+
+        def do_compare():
+            bomA = self.tuning_boms[comboA.current()]
+            bomB = self.tuning_boms[comboB.current()]
+            win.destroy()
+            self.show_tuning_difference_table(bomA, bomB)
+
+        tk.Button(win, text="Compare", command=do_compare).pack(pady=10)
+
+
+    # ============================================================
+    # DIFFERENCE TABLE UI
+    # ============================================================
+
+    def show_tuning_difference_table(self, bomA, bomB):
+        win = tk.Toplevel()
+        win.title("Tuning BOM Differences")
+
+        tree = ttk.Treeview(
+            win,
+            columns=("ref", "A_val", "A_unit", "B_val", "B_unit"),
+            show="headings",
         )
+        tree.pack(fill="both", expand=True)
+
+        tree.heading("ref", text="Reference")
+        tree.heading("A_val", text="A Value")
+        tree.heading("A_unit", text="A Unit")
+        tree.heading("B_val", text="B Value")
+        tree.heading("B_unit", text="B Unit")
+
+        refs = sorted(set(bomA.keys()) | set(bomB.keys()))
+
+        for ref in refs:
+            A_val = bomA.get(ref, {}).get("value", "")
+            A_unit = bomA.get(ref, {}).get("unit", "")
+            B_val = bomB.get(ref, {}).get("value", "")
+            B_unit = bomB.get(ref, {}).get("unit", "")
+
+            if not values_match(A_val, A_unit, B_val, B_unit):
+                tree.insert("", "end", values=(ref, A_val, A_unit, B_val, B_unit))
+    # ============================================================
+    # REDRAW CANVAS
+    # ============================================================
+
+    def redraw(self):
+        """Clear and redraw all components based on xy_data."""
+        self.canvas.delete("all")
+
+        if not self.xy_data:
+            return
+
+        for ref, info in self.xy_data.items():
+            val = info.get("value", "")
+            unit = info.get("unit", "")
+            angle = info.get("angle", 0)
+
+            # Auto-fill units if value exists but unit missing
+            if val and not unit:
+                unit = self.auto_default_unit(ref, unit)
+                info["unit"] = unit  # keep consistent with model
+
+            # Determine highlight mode
+            highlight = None
+
+            # Missing = red
+            if val in ["", None]:
+                highlight = "missing"
+
+            # Production mismatch = yellow
+            if self.production_bom and ref in self.production_bom:
+                pval = self.production_bom[ref]["value"]
+                punit = self.production_bom[ref]["unit"]
+
+                # Only mismatch if both are non-empty and different
+                if pval or punit:
+                    if not values_match(val, unit, pval, punit):
+                        highlight = "mismatch"
+
+            # Draw component
+            ComponentBox(
+                self.canvas,
+                ref,
+                info["x"],
+                info["y"],
+                angle,
+                comp_type=info.get("comp_type", "Unknown"),
+                value=val,
+                unit=unit,
+                highlight=highlight,
+            )
+
 
 # ============================================================
-# RUN APP
+# APPLICATION ENTRY POINT
 # ============================================================
-root = tk.Tk()
-app = LayoutApp(root)
-root.mainloop()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = LayoutApp(root)
+    root.mainloop()
