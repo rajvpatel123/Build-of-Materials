@@ -2,11 +2,12 @@ import csv
 import math
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+
 from openpyxl import load_workbook, Workbook
 
 
 # ============================================================
-# CHECK VALUE+UNIT MATCH
+# VALUE + UNIT COMPARISON
 # ============================================================
 
 def values_match(v1, u1, v2, u2):
@@ -14,13 +15,12 @@ def values_match(v1, u1, v2, u2):
 
 
 # ============================================================
-# COMPONENT BOX CLASS
+# COMPONENT BOX
 # ============================================================
 
 class ComponentBox:
     def __init__(self, canvas, ref, x, y, angle,
                  comp_type="Unknown", value="", unit="", highlight=None):
-
         self.canvas = canvas
         self.ref = ref
         self.x = x
@@ -36,6 +36,7 @@ class ComponentBox:
 
         self.rect = None
         self.label = None
+
         self.draw()
         self.bind_events()
 
@@ -47,16 +48,13 @@ class ComponentBox:
         return self.ref
 
     def draw(self):
+        # Rectangle corners before rotation
         w = self.width / 2
         h = self.height / 2
-
-        corners = [
-            (-w, -h), (w, -h), (w, h), (-w, h)
-        ]
+        corners = [(-w, -h), (w, -h), (w, h), (-w, h)]
 
         theta = math.radians(self.angle)
         rotated = []
-
         for (cx, cy) in corners:
             rx = cx * math.cos(theta) - cy * math.sin(theta)
             ry = cx * math.sin(theta) + cy * math.cos(theta)
@@ -71,9 +69,11 @@ class ComponentBox:
         else:
             color = "lightblue"
 
-        self.rect = self.canvas.create_polygon(points, fill=color, outline="black", width=2)
+        self.rect = self.canvas.create_polygon(
+            points, fill=color, outline="black", width=2
+        )
 
-        # Label placement
+        # Label placement based on angle
         angle = self.angle % 360
         offset = 6
         side_offset = 12
@@ -87,7 +87,9 @@ class ComponentBox:
         else:
             lx, ly = self.x - w - side_offset, self.y
 
-        self.label = self.canvas.create_text(lx, ly, text=self.formatted_label(), font=("Arial", 9))
+        self.label = self.canvas.create_text(
+            lx, ly, text=self.formatted_label(), font=("Arial", 9)
+        )
 
     def bind_events(self):
         for tag in (self.rect, self.label):
@@ -105,7 +107,10 @@ class ComponentBox:
         val_entry.pack()
 
         tk.Label(popup, text="Unit:").pack()
-        unit_box = ttk.Combobox(popup, values=["pF", "nF", "uF", "pH", "nH", "Ohms"])
+        unit_box = ttk.Combobox(
+            popup,
+            values=["pF", "nF", "uF", "pH", "nH", "Ohms"]
+        )
         unit_box.set(self.unit)
         unit_box.pack()
 
@@ -115,9 +120,13 @@ class ComponentBox:
         ang_entry.pack()
 
         def save():
-            self.value = val_entry.get()
-            self.unit = unit_box.get()
-            self.angle = float(ang_entry.get())
+            try:
+                self.value = val_entry.get()
+                self.unit = unit_box.get()
+                self.angle = float(ang_entry.get())
+            except ValueError:
+                messagebox.showerror("Error", "Angle must be a number.")
+                return
 
             self.canvas.delete(self.rect)
             self.canvas.delete(self.label)
@@ -143,26 +152,35 @@ class LayoutApp:
         self.production_bom = None
         self.production_bom_headers = None
 
-        self.scale_factor = 100  # fixed
+        # Fixed scale factor for XY positions
+        self.scale_factor = 100
 
+        # Top toolbar
         top = tk.Frame(root)
         top.pack(fill="x")
 
-        tk.Button(top, text="Load XY File", command=self.load_xy_file).pack(side="left", padx=5)
-        tk.Button(top, text="Load Production BOM", command=self.load_production_bom).pack(side="left", padx=5)
-        tk.Button(top, text="Export Production BOM", command=self.export_production_bom).pack(side="left", padx=5)
+        tk.Button(top, text="Load XY File",
+                  command=self.load_xy_file).pack(side="left", padx=5)
+        tk.Button(top, text="Load Production BOM",
+                  command=self.load_production_bom).pack(side="left", padx=5)
+        tk.Button(top, text="Export Production BOM",
+                  command=self.export_production_bom).pack(side="left", padx=5)
+        tk.Button(top, text="Load Tuning BOM",
+                  command=self.load_tuning_bom_csv).pack(side="left", padx=5)
+        tk.Button(top, text="Apply Selected Tuning BOM",
+                  command=self.apply_selected_tuning_bom).pack(side="left", padx=5)
+        tk.Button(top, text="Save Tuning BOM",
+                  command=self.save_tuning_bom_csv).pack(side="left", padx=5)
+        tk.Button(top, text="Compare Tuning BOMs",
+                  command=self.compare_tuning_boms).pack(side="left", padx=5)
 
-        tk.Button(top, text="Load Tuning BOM", command=self.load_tuning_bom_csv).pack(side="left", padx=5)
-        tk.Button(top, text="Apply Selected Tuning BOM", command=self.apply_selected_tuning_bom).pack(side="left", padx=5)
-        tk.Button(top, text="Save Tuning BOM", command=self.save_tuning_bom_csv).pack(side="left", padx=5)
-        tk.Button(top, text="Compare Tuning BOMs", command=self.compare_tuning_boms).pack(side="left", padx=5)
-
+        # Drawing canvas
         self.canvas = tk.Canvas(root, width=1500, height=900, bg="white")
         self.canvas.pack(fill="both", expand=True)
-    # ============================================================
-    # AUTO-UNIT ASSIGNER
-    # ============================================================
 
+    # ========================================================
+    # AUTO-UNIT ASSIGNER
+    # ========================================================
     def auto_default_unit(self, ref, unit):
         """If a component has a value but no unit, auto-infer one."""
         if unit not in ["", None]:
@@ -177,11 +195,9 @@ class LayoutApp:
             return "nH"
         return ""
 
-
-    # ============================================================
-    # LOAD XY FILE (CSV) — SCALE = 100
-    # ============================================================
-
+    # ========================================================
+    # LOAD XY FILE (CSV)
+    # ========================================================
     def load_xy_file(self):
         fp = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
         if not fp:
@@ -191,7 +207,6 @@ class LayoutApp:
         try:
             with open(fp, newline="", encoding="utf-8-sig") as f:
                 reader = csv.DictReader(f)
-
                 for row in reader:
                     ref = (
                         row.get("ReferenceID")
@@ -205,10 +220,10 @@ class LayoutApp:
                         continue
 
                     try:
-                        x = float(row.get("X", "").strip())
-                        y = float(row.get("Y", "").strip())
-                        angle = float(row.get("Angle", "0").strip())
-                    except:
+                        x = float((row.get("X") or "").strip())
+                        y = float((row.get("Y") or "").strip())
+                        angle = float((row.get("Angle") or "0").strip())
+                    except ValueError:
                         continue
 
                     x *= self.scale_factor
@@ -223,7 +238,6 @@ class LayoutApp:
                         "unit": "",
                         "comp_type": self.detect_type(ref),
                     }
-
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load XY file:\n{e}")
             return
@@ -232,11 +246,9 @@ class LayoutApp:
         messagebox.showinfo("Loaded", "XY file loaded.")
         self.redraw()
 
-
-    # ============================================================
+    # ========================================================
     # DETECT COMPONENT TYPE
-    # ============================================================
-
+    # ========================================================
     def detect_type(self, ref):
         r = ref.upper()
         if r.startswith("C"):
@@ -247,11 +259,9 @@ class LayoutApp:
             return "Inductor"
         return "Unknown"
 
-
-    # ============================================================
+    # ========================================================
     # LOAD PRODUCTION BOM
-    # ============================================================
-
+    # ========================================================
     def load_production_bom(self):
         fp = filedialog.askopenfilename(filetypes=[("Excel Files", "*.xlsx")])
         if not fp:
@@ -264,12 +274,11 @@ class LayoutApp:
         self.production_bom = bom
         self.production_bom_headers = headers
 
-        # Apply to workspace immediately
+        # Apply values/units to existing XY components
         for ref, info in self.xy_data.items():
             if ref in self.production_bom:
-                bval = self.production_bom[ref]["value"]
-                bunt = self.production_bom[ref]["unit"]
-
+                bval = self.production_bom[ref].get("value", "")
+                bunt = self.production_bom[ref].get("unit", "")
                 if bval:
                     info["value"] = bval
                 if bunt:
@@ -278,11 +287,9 @@ class LayoutApp:
         messagebox.showinfo("Loaded", "Production BOM applied.")
         self.redraw()
 
-
-    # ============================================================
+    # ========================================================
     # EXPORT PRODUCTION BOM
-    # ============================================================
-
+    # ========================================================
     def export_production_bom(self):
         if not self.production_bom:
             messagebox.showerror("Error", "No production BOM loaded.")
@@ -291,7 +298,7 @@ class LayoutApp:
         save_path = filedialog.asksaveasfilename(
             defaultextension=".xlsx",
             filetypes=[("Excel Files", "*.xlsx")],
-            title="Export Production BOM"
+            title="Export Production BOM",
         )
         if not save_path:
             return
@@ -299,23 +306,24 @@ class LayoutApp:
         wb = Workbook()
         ws = wb.active
 
-        # Write headers
+        # Write headers as they were read
         for c, header in enumerate(self.production_bom_headers, start=1):
             ws.cell(row=1, column=c, value=header)
 
+        # Try to find ref/value/unit columns; fall back if missing
         try:
             col_ref = self.production_bom_headers.index("Reference Designator") + 1
-        except:
+        except ValueError:
             col_ref = 1
 
         try:
             col_val = self.production_bom_headers.index("Value") + 1
-        except:
+        except ValueError:
             col_val = 2
 
         try:
             col_unit = self.production_bom_headers.index("Unit") + 1
-        except:
+        except ValueError:
             col_unit = 3
 
         row = 2
@@ -328,19 +336,17 @@ class LayoutApp:
         wb.save(save_path)
         messagebox.showinfo("Saved", f"Production BOM exported:\n{save_path}")
 
-
-    # ============================================================
-    # PARSE PRODUCTION BOM (FULL FIXED VERSION)
-    # ============================================================
-
+    # ========================================================
+    # PARSE PRODUCTION BOM (IGNORE QTY/UNIT FOR UNITS)
+    # ========================================================
     def parse_production_bom(self, filepath):
         """
-        FIXED parser:
         - Detects header row automatically
-        - Splits multi-reference cells
-        - Safely removes quantities (no crash)
-        - 0 = missing
-        - Auto unit assignment for missing unit
+        - Splits multi-reference cells (e.g. 'C10, C3')
+        - Extracts numeric + unit from Value cell text ONLY
+        - Ignores dedicated Unit column and 'Qty / Unit' for electrical units
+        - Treats 0 as missing
+        - Auto-assigns default unit when needed
         """
         try:
             wb = load_workbook(filepath, data_only=True)
@@ -351,10 +357,9 @@ class LayoutApp:
 
         REF_KEYS = ["reference designator"]
         VALUE_KEYS = ["value"]
-        UNIT_KEYS = ["unit", "units"]
 
         header_row = None
-        col_ref = col_val = col_unit = None
+        col_ref = col_val = None
 
         # Detect header row
         for r in range(1, 60):
@@ -371,18 +376,13 @@ class LayoutApp:
                 header_row = r
                 col_ref = possible_ref[0]
                 col_val = possible_val[0]
-
-                for c, t in row_vals:
-                    if any(k in t for k in UNIT_KEYS):
-                        col_unit = c
-
                 break
 
         if not header_row:
             messagebox.showerror("Error", "Could not find BOM header row.")
             return None, None
 
-        # Extract headers
+        # Preserve original header row for export
         headers = [
             ws.cell(header_row, c).value or ""
             for c in range(1, ws.max_column + 1)
@@ -393,12 +393,11 @@ class LayoutApp:
         for r in range(header_row + 1, ws.max_row + 1):
             ref_cell = ws.cell(r, col_ref).value
             val_cell = ws.cell(r, col_val).value
-            unit_cell = ws.cell(r, col_unit).value if col_unit else ""
 
             if not ref_cell:
                 continue
 
-            # Split C10, C11, C12 into separate entries
+            # Split multi-reference cells: "C10, C3" etc.
             refs = (
                 str(ref_cell)
                 .replace(";", ",")
@@ -407,32 +406,37 @@ class LayoutApp:
                 .split(",")
             )
 
-            # Safe value extraction
+            # Get last token from Value cell (so "2 2.5pF" -> "2.5pF")
             raw_val_str = str(val_cell).strip() if val_cell else ""
             parts = raw_val_str.split()
-            raw_val_str = parts[0] if parts else ""
+            raw_val_str = parts[-1] if parts else ""
 
             numeric = self.extract_numeric(raw_val_str)
-            unit = self.extract_unit(raw_val_str, unit_cell)
+            # ENFORCE: unit is inferred from value text only
+            unit = self.extract_unit(raw_val_str, explicit_unit="")
 
             if numeric == "0":
                 numeric = ""
                 unit = ""
             else:
-                unit = self.auto_default_unit(refs[0], unit)
+                # If still no unit, auto-assign based on ref prefix
+                if refs:
+                    unit = self.auto_default_unit(refs[0], unit)
 
             for ref in refs:
                 ref = ref.strip()
                 if not ref:
                     continue
-
-                bom[ref] = {"value": numeric, "unit": unit}
+                bom[ref] = {
+                    "value": numeric,
+                    "unit": unit,
+                }
 
         return bom, headers
-    # ============================================================
-    # EXTRACT NUMERIC + UNIT HELPERS
-    # ============================================================
 
+    # ========================================================
+    # NUMERIC + UNIT HELPERS
+    # ========================================================
     def extract_numeric(self, raw):
         if raw in ["", None]:
             return ""
@@ -444,8 +448,10 @@ class LayoutApp:
         return out
 
     def extract_unit(self, raw, explicit_unit):
+        # We intentionally ignore explicit_unit here in production BOM,
+        # but the function supports it for tuning BOM or future use.
         if explicit_unit not in ["", None]:
-            return explicit_unit
+            return str(explicit_unit).strip()
 
         if raw in ["", None]:
             return ""
@@ -467,22 +473,18 @@ class LayoutApp:
 
         return ""
 
-
-    # ============================================================
+    # ========================================================
     # LOAD TUNING BOM (CSV)
-    # ============================================================
-
+    # ========================================================
     def load_tuning_bom_csv(self):
         fp = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
         if not fp:
             return
 
         tuning = {}
-
         try:
             with open(fp, newline="", encoding="utf-8-sig") as f:
                 reader = csv.DictReader(f)
-
                 for row in reader:
                     ref = (
                         row.get("ReferenceID")
@@ -490,21 +492,20 @@ class LayoutApp:
                         or row.get("Ref")
                         or ""
                     ).strip()
-
                     if not ref:
                         continue
 
                     raw_val = (row.get("Value") or "").strip()
                     raw_unit = (row.get("Unit") or "").strip()
 
-                    # Safe split
                     parts = raw_val.split()
-                    raw_val = parts[0] if parts else ""
+                    raw_val = parts[-1] if parts else ""
 
                     numeric = self.extract_numeric(raw_val)
-                    unit = self.extract_unit(raw_val, raw_unit)
+                    # For tuning BOM, allow Unit column if provided;
+                    # pass raw_unit as explicit_unit.
+                    unit = self.extract_unit(raw_val, explicit_unit=raw_unit)
 
-                    # Zero = missing
                     if numeric == "0":
                         numeric = ""
                         unit = ""
@@ -515,7 +516,6 @@ class LayoutApp:
                         "value": numeric,
                         "unit": unit,
                     }
-
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load tuning BOM:\n{e}")
             return
@@ -524,11 +524,9 @@ class LayoutApp:
         self.tuning_bom_names.append(fp)
         messagebox.showinfo("Loaded", f"Tuning BOM loaded:\n{fp}")
 
-
-    # ============================================================
+    # ========================================================
     # SAVE TUNING BOM (CSV)
-    # ============================================================
-
+    # ========================================================
     def save_tuning_bom_csv(self):
         if not self.xy_data:
             messagebox.showerror("Error", "Load XY file first.")
@@ -537,7 +535,7 @@ class LayoutApp:
         save_path = filedialog.asksaveasfilename(
             defaultextension=".csv",
             filetypes=[("CSV Files", "*.csv")],
-            title="Save Tuning BOM"
+            title="Save Tuning BOM",
         )
         if not save_path:
             return
@@ -558,11 +556,9 @@ class LayoutApp:
 
         messagebox.showinfo("Saved", f"Tuning BOM saved:\n{save_path}")
 
-
-    # ============================================================
+    # ========================================================
     # APPLY SELECTED TUNING BOM
-    # ============================================================
-
+    # ========================================================
     def apply_selected_tuning_bom(self):
         if not self.tuning_boms:
             messagebox.showerror("Error", "No tuning BOMs loaded.")
@@ -574,7 +570,7 @@ class LayoutApp:
         tk.Label(win, text="Choose tuning BOM:").pack()
 
         names = [
-            f"Tuning {i+1}: {self.tuning_bom_names[i]}"
+            f"Tuning {i + 1}: {self.tuning_bom_names[i]}"
             for i in range(len(self.tuning_boms))
         ]
 
@@ -585,22 +581,18 @@ class LayoutApp:
 
         def do_apply():
             bom = self.tuning_boms[box.current()]
-
             for ref, info in self.xy_data.items():
                 if ref in bom:
                     info["value"] = bom[ref]["value"]
                     info["unit"] = bom[ref]["unit"]
-
             win.destroy()
             self.redraw()
 
         tk.Button(win, text="Apply", command=do_apply).pack(pady=10)
 
-
-    # ============================================================
+    # ========================================================
     # COMPARE TUNING BOMs
-    # ============================================================
-
+    # ========================================================
     def compare_tuning_boms(self):
         if len(self.tuning_boms) < 2:
             messagebox.showerror("Error", "Load at least 2 tuning BOMs.")
@@ -610,7 +602,7 @@ class LayoutApp:
         win.title("Compare Tuning BOMs")
 
         names = [
-            f"Tuning {i+1}: {self.tuning_bom_names[i]}"
+            f"Tuning {i + 1}: {self.tuning_bom_names[i]}"
             for i in range(len(self.tuning_boms))
         ]
 
@@ -624,7 +616,7 @@ class LayoutApp:
         selB = tk.StringVar()
         comboB = ttk.Combobox(win, textvariable=selB, values=names, width=60)
         comboB.pack()
-        comboB.current(1)
+        comboB.current(1 if len(self.tuning_boms) > 1 else 0)
 
         def do_compare():
             bomA = self.tuning_boms[comboA.current()]
@@ -634,11 +626,9 @@ class LayoutApp:
 
         tk.Button(win, text="Compare", command=do_compare).pack(pady=10)
 
-
-    # ============================================================
+    # ========================================================
     # DIFFERENCE TABLE UI
-    # ============================================================
-
+    # ========================================================
     def show_tuning_difference_table(self, bomA, bomB):
         win = tk.Toplevel()
         win.title("Tuning BOM Differences")
@@ -657,7 +647,6 @@ class LayoutApp:
         tree.heading("B_unit", text="B Unit")
 
         refs = sorted(set(bomA.keys()) | set(bomB.keys()))
-
         for ref in refs:
             A_val = bomA.get(ref, {}).get("value", "")
             A_unit = bomA.get(ref, {}).get("unit", "")
@@ -665,11 +654,14 @@ class LayoutApp:
             B_unit = bomB.get(ref, {}).get("unit", "")
 
             if not values_match(A_val, A_unit, B_val, B_unit):
-                tree.insert("", "end", values=(ref, A_val, A_unit, B_val, B_unit))
-    # ============================================================
-    # REDRAW CANVAS
-    # ============================================================
+                tree.insert(
+                    "", "end",
+                    values=(ref, A_val, A_unit, B_val, B_unit)
+                )
 
+    # ========================================================
+    # REDRAW CANVAS
+    # ========================================================
     def redraw(self):
         """Clear and redraw all components based on xy_data."""
         self.canvas.delete("all")
@@ -685,26 +677,23 @@ class LayoutApp:
             # Auto-fill units if value exists but unit missing
             if val and not unit:
                 unit = self.auto_default_unit(ref, unit)
-                info["unit"] = unit  # keep consistent with model
+                info["unit"] = unit
 
             # Determine highlight mode
             highlight = None
 
-            # Missing = red
+            # Missing value → red
             if val in ["", None]:
                 highlight = "missing"
 
-            # Production mismatch = yellow
+            # Production BOM mismatch → yellow
             if self.production_bom and ref in self.production_bom:
-                pval = self.production_bom[ref]["value"]
-                punit = self.production_bom[ref]["unit"]
-
-                # Only mismatch if both are non-empty and different
+                pval = self.production_bom[ref].get("value", "")
+                punit = self.production_bom[ref].get("unit", "")
                 if pval or punit:
                     if not values_match(val, unit, pval, punit):
                         highlight = "mismatch"
 
-            # Draw component
             ComponentBox(
                 self.canvas,
                 ref,
