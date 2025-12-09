@@ -7,21 +7,34 @@ from openpyxl import load_workbook, Workbook
 
 
 # ============================================================
-# VALUE + UNIT COMPARISON
+# Utility: compare value + unit
 # ============================================================
 
 def values_match(v1, u1, v2, u2):
+    """Return True if both value and unit strings match (after stripping)."""
     return str(v1).strip() == str(v2).strip() and str(u1).strip() == str(u2).strip()
 
 
 # ============================================================
-# COMPONENT BOX
+# ComponentBox: visual representation of one component
 # ============================================================
 
 class ComponentBox:
     def __init__(self, canvas, ref, x, y, angle,
                  comp_type="Unknown", value="", unit="", highlight=None,
-                 box_scale=1.0):
+                 box_scale=1.0, nc=False):
+        """
+        canvas    : Tk canvas to draw on
+        ref       : reference designator string (e.g. 'L3')
+        x, y      : canvas coordinates (already scaled/translated)
+        angle     : rotation angle in degrees
+        comp_type : 'Capacitor', 'Inductor', etc. (not used visually yet)
+        value     : normalized numeric value string (e.g. '2.5')
+        unit      : normalized unit string (e.g. 'pF', 'Ohms')
+        highlight : None / 'missing' / 'mismatch' (controls box color)
+        box_scale : visual scaling factor for box/label size
+        nc        : True if this is intentionally marked 'No Component' (N/C)
+        """
         self.canvas = canvas
         self.ref = ref
         self.x = x
@@ -31,6 +44,7 @@ class ComponentBox:
         self.value = value
         self.unit = unit
         self.highlight = highlight
+        self.nc = nc
 
         self.box_scale = box_scale
         base_w = 60
@@ -45,13 +59,18 @@ class ComponentBox:
         self.bind_events()
 
     def formatted_label(self):
+        """Return the text shown next to the box."""
+        base = self.ref
+        if self.nc:
+            return f"{base} N/C"
         if self.value and self.unit:
-            return f"{self.ref} {self.value}{self.unit}"
+            return f"{base} {self.value}{self.unit}"
         elif self.value:
-            return f"{self.ref} {self.value}"
-        return self.ref
+            return f"{base} {self.value}"
+        return base
 
     def draw(self):
+        """Draw the rotated rectangle and text label."""
         w = self.width / 2
         h = self.height / 2
         corners = [(-w, -h), (w, -h), (w, h), (-w, h)]
@@ -80,6 +99,7 @@ class ComponentBox:
         offset = 6 * self.box_scale
         side_offset = 12 * self.box_scale
 
+        # Place the label on a side that stays readable for common angles
         if 315 <= angle or angle < 45:
             lx, ly = self.x, self.y + h + offset
         elif 45 <= angle < 135:
@@ -94,10 +114,12 @@ class ComponentBox:
         )
 
     def bind_events(self):
+        """Attach right-click handler to both box and label."""
         for tag in (self.rect, self.label):
             self.canvas.tag_bind(tag, "<Button-3>", self.right_click)
 
     def right_click(self, event):
+        """Popup editor for value/unit/angle and N/C."""
         popup = tk.Toplevel()
         popup.title(f"Edit {self.ref}")
 
@@ -121,18 +143,12 @@ class ComponentBox:
         ang_entry.insert(0, str(self.angle))
         ang_entry.pack()
 
-        def save():
-            try:
-                new_value = val_entry.get()
-                new_unit = unit_box.get()
-                new_angle = float(ang_entry.get())
-            except ValueError:
-                messagebox.showerror("Error", "Angle must be a number.")
-                return
-
+        def save_common(new_value, new_unit, new_angle, nc_flag):
+            """Update this box and underlying model, then redraw."""
             self.value = new_value
             self.unit = new_unit
             self.angle = new_angle
+            self.nc = nc_flag
 
             app = getattr(self.canvas, "app_ref", None)
             if app is not None:
@@ -140,6 +156,7 @@ class ComponentBox:
                     app.xy_data[self.ref]["value"] = new_value
                     app.xy_data[self.ref]["unit"] = new_unit
                     app.xy_data[self.ref]["angle"] = new_angle
+                    app.xy_data[self.ref]["nc"] = nc_flag
                 app.redraw()
                 app.refresh_production_tree()
             else:
@@ -148,13 +165,41 @@ class ComponentBox:
                 self.draw()
                 self.bind_events()
 
+        def save():
+            """Normal save: keep whatever value/unit the user typed."""
+            try:
+                new_value = val_entry.get()
+                new_unit = unit_box.get()
+                new_angle = float(ang_entry.get())
+            except ValueError:
+                messagebox.showerror("Error", "Angle must be a number.")
+                return
+            save_common(new_value, new_unit, new_angle, nc_flag=False)
             popup.destroy()
 
-        tk.Button(popup, text="Save", command=save).pack(pady=10)
+        def set_nc():
+            """
+            Mark this as No Component:
+            - clear value/unit
+            - keep angle
+            - set nc flag so label shows 'REF N/C' and box goes red
+            """
+            try:
+                new_angle = float(ang_entry.get())
+            except ValueError:
+                new_angle = self.angle
+            save_common("", "", new_angle, nc_flag=True)
+            popup.destroy()
+
+        btn_frame = tk.Frame(popup)
+        btn_frame.pack(pady=10, fill="x")
+
+        tk.Button(btn_frame, text="Save", command=save).pack(side="left", padx=5)
+        tk.Button(btn_frame, text="N/C", command=set_nc).pack(side="left", padx=5)
 
 
 # ============================================================
-# MAIN APPLICATION
+# LayoutApp: main GUI/controller
 # ============================================================
 
 class LayoutApp:
@@ -162,17 +207,21 @@ class LayoutApp:
         self.root = root
         self.root.title("Chipset BOM + XY Layout Tool")
 
-        self.xy_data = {}          # scaled coords
-        self.raw_xy_data = {}      # original coords from CSV
-        self.tuning_boms = []
-        self.tuning_bom_names = []
+        # Data structures
+        self.xy_data = {}          # scaled coords + state for drawing
+        self.raw_xy_data = {}      # original coords from XY CSV
+        self.tuning_boms = []      # list of {ref: {value, unit}}
+        self.tuning_bom_names = [] # filenames for display
         self.production_bom = None
         self.production_bom_headers = None
 
-        self.scale_factor = 100    # XY scale
-        self.box_scale = 1.5       # visual component size scale
+        # Visual scale settings
+        self.scale_factor = 100    # XY coordinate scale
+        self.box_scale = 1.5       # component box size scale
 
+        # ----------------------------------------------------
         # Menu bar with Scale presets
+        # ----------------------------------------------------
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
 
@@ -187,18 +236,22 @@ class LayoutApp:
         scale_menu.add_command(label="X-Large (2.0x)",
                                command=lambda: self.set_scale(2.0, 180))
 
+        # ----------------------------------------------------
+        # Main layout: left canvas, right sidebar
+        # ----------------------------------------------------
         main = tk.Frame(root)
         main.pack(fill="both", expand=True)
 
-        # Canvas (left)
+        # Canvas for component layout
         self.canvas = tk.Canvas(main, bg="white")
         self.canvas.app_ref = self
         self.canvas.pack(side="left", fill="both", expand=True)
 
-        # Sidebar (right)
+        # Sidebar for controls and views
         sidebar = tk.Frame(main)
         sidebar.pack(side="right", fill="y")
 
+        # Top buttons
         top = tk.Frame(sidebar)
         top.pack(fill="x", pady=5)
 
@@ -215,12 +268,13 @@ class LayoutApp:
         tk.Button(top, text="Compare BOMs",
                   command=self.compare_boms).pack(fill="x", padx=5, pady=2)
 
+        # Clear buttons
         tk.Label(sidebar, text="Clear:", font=("Arial", 9, "bold")).pack(anchor="w", padx=5, pady=(8, 0))
         tk.Button(sidebar, text="Clear XY", command=self.clear_xy).pack(fill="x", padx=5, pady=2)
         tk.Button(sidebar, text="Clear Tuning BOMs", command=self.clear_tuning_boms).pack(fill="x", padx=5, pady=2)
         tk.Button(sidebar, text="Clear Production BOM", command=self.clear_production_bom).pack(fill="x", padx=5, pady=2)
 
-        # Tuning BOMs
+        # Tuning BOM list + actions
         tuning_frame = tk.LabelFrame(sidebar, text="Tuning BOMs")
         tuning_frame.pack(fill="both", expand=True, padx=5, pady=4)
 
@@ -229,9 +283,11 @@ class LayoutApp:
         self.tuning_buttons_frame.pack(fill="both", expand=True)
 
         tk.Button(tuning_frame, text="Apply Selected",
-                  command=self.apply_selected_tuning_bom_sidebar).pack(fill="x", pady=4)
+                  command=self.apply_selected_tuning_bom_sidebar).pack(fill="x", pady=2)
+        tk.Button(tuning_frame, text="Compare Tuning BOMs",
+                  command=self.compare_tuning_boms).pack(fill="x", pady=2)
 
-        # Production BOM view
+        # Production BOM tree view
         prod_frame = tk.LabelFrame(sidebar, text="Production BOM")
         prod_frame.pack(fill="both", expand=True, padx=5, pady=4)
 
@@ -253,14 +309,16 @@ class LayoutApp:
                   command=self.refresh_production_tree).pack(fill="x", pady=2)
 
     # ========================================================
-    # SCALE PRESETS
+    # Scale presets
     # ========================================================
     def set_scale(self, box_scale, xy_scale):
-        """Adjust visual component size and XY spacing."""
+        """
+        Change visual scale for boxes and XY spacing.
+        Recomputes scaled coordinates from stored raw XY data.
+        """
         self.box_scale = box_scale
         self.scale_factor = xy_scale
 
-        # Re-compute scaled XY positions from raw data if present
         if self.raw_xy_data:
             for ref, raw in self.raw_xy_data.items():
                 if ref not in self.xy_data:
@@ -270,6 +328,7 @@ class LayoutApp:
                         "unit": "",
                         "angle": raw.get("angle", 0),
                         "comp_type": self.detect_type(ref),
+                        "nc": False,
                     }
                 self.xy_data[ref]["x"] = raw["x"] * self.scale_factor
                 self.xy_data[ref]["y"] = raw["y"] * self.scale_factor
@@ -277,7 +336,7 @@ class LayoutApp:
         self.redraw()
 
     # ========================================================
-    # CLEAR OPERATIONS
+    # Clear operations
     # ========================================================
     def clear_xy(self):
         self.xy_data = {}
@@ -300,9 +359,10 @@ class LayoutApp:
         messagebox.showinfo("Cleared", "Production BOM cleared.")
 
     # ========================================================
-    # AUTO-UNIT ASSIGNER
+    # Helpers: auto unit, type detection
     # ========================================================
     def auto_default_unit(self, ref, unit):
+        """If a component has a value but no unit, infer one from ref prefix."""
         if unit not in ["", None]:
             return unit
 
@@ -315,8 +375,18 @@ class LayoutApp:
             return "nH"
         return ""
 
+    def detect_type(self, ref):
+        r = ref.upper()
+        if r.startswith("C"):
+            return "Capacitor"
+        if r.startswith("R"):
+            return "Resistor"
+        if r.startswith("L"):
+            return "Inductor"
+        return "Unknown"
+
     # ========================================================
-    # LOAD XY FILE (CSV)
+    # Load XY file (CSV)
     # ========================================================
     def load_xy_file(self):
         fp = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
@@ -364,6 +434,7 @@ class LayoutApp:
                         "value": "",
                         "unit": "",
                         "comp_type": self.detect_type(ref),
+                        "nc": False,
                     }
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load XY file:\n{e}")
@@ -375,20 +446,7 @@ class LayoutApp:
         self.redraw()
 
     # ========================================================
-    # DETECT COMPONENT TYPE
-    # ========================================================
-    def detect_type(self, ref):
-        r = ref.upper()
-        if r.startswith("C"):
-            return "Capacitor"
-        if r.startswith("R"):
-            return "Resistor"
-        if r.startswith("L"):
-            return "Inductor"
-        return "Unknown"
-
-    # ========================================================
-    # LOAD PRODUCTION BOM
+    # Load / export production BOM
     # ========================================================
     def load_production_bom(self):
         fp = filedialog.askopenfilename(filetypes=[("Excel Files", "*.xlsx")])
@@ -402,8 +460,9 @@ class LayoutApp:
         self.production_bom = bom
         self.production_bom_headers = headers
 
+        # Apply BOM values to current XY components (except N/C)
         for ref, info in self.xy_data.items():
-            if ref in self.production_bom:
+            if ref in self.production_bom and not info.get("nc", False):
                 bval = self.production_bom[ref].get("value", "")
                 bunt = self.production_bom[ref].get("unit", "")
                 info["value"] = bval
@@ -413,10 +472,8 @@ class LayoutApp:
         self.refresh_production_tree()
         self.redraw()
 
-    # ========================================================
-    # REFRESH PRODUCTION BOM TREE
-    # ========================================================
     def refresh_production_tree(self):
+        """Populate the right-side tree with the current production BOM."""
         for item in self.prod_tree.get_children():
             self.prod_tree.delete(item)
 
@@ -431,9 +488,6 @@ class LayoutApp:
                 values=(ref, d.get("value", ""), d.get("unit", "")),
             )
 
-    # ========================================================
-    # EXPORT PRODUCTION BOM
-    # ========================================================
     def export_production_bom(self):
         if not self.production_bom:
             messagebox.showerror("Error", "No production BOM loaded.")
@@ -453,6 +507,7 @@ class LayoutApp:
         for c, header in enumerate(self.production_bom_headers, start=1):
             ws.cell(row=1, column=c, value=header)
 
+        # Try to preserve original columns
         try:
             col_ref = self.production_bom_headers.index("Reference Designator") + 1
         except ValueError:
@@ -479,9 +534,20 @@ class LayoutApp:
         messagebox.showinfo("Saved", f"Production BOM exported:\n{save_path}")
 
     # ========================================================
-    # PARSE PRODUCTION BOM (RESISTORS + 0 OHM)
+    # Parse production BOM (handles resistors and 0 Ohm)
     # ========================================================
     def parse_production_bom(self, filepath):
+        """
+        Parser for Excel BOM that:
+
+        - Detects header row with 'Reference Designator' and 'Value'
+        - Uses 'Reference Designator' for refs
+        - Uses 'Value' for value/unit parsing
+        - Uses 'Type' column (C) to identify resistors ('Res')
+        - Splits multi-reference cells like 'R4, R5'
+        - Keeps 0 Ohm resistors as numeric 0, unit Ohms
+        - Treats numeric 0 as missing for non-resistor rows
+        """
         try:
             wb = load_workbook(filepath, data_only=True)
             ws = wb.active
@@ -495,6 +561,7 @@ class LayoutApp:
         header_row = None
         col_ref = col_val = None
 
+        # Find header row
         for r in range(1, 60):
             row_vals = [
                 (c, str(ws.cell(r, c).value).strip().lower())
@@ -520,13 +587,16 @@ class LayoutApp:
 
         bom = {}
 
+        # Walk all data rows
         for r in range(header_row + 1, ws.max_row + 1):
             ref_cell = ws.cell(r, col_ref).value
             val_cell = ws.cell(r, col_val).value
 
             if not ref_cell:
+                # Skip blank reference rows but continue to later rows
                 continue
 
+            # Split cell like "R4, R5" into separate refs
             refs = (
                 str(ref_cell)
                 .replace(";", ",")
@@ -540,10 +610,12 @@ class LayoutApp:
             numeric = self.extract_numeric(raw_val_str)
             inferred_unit = self.extract_unit(raw_val_str, explicit_unit="")
 
-            type_cell = ws.cell(r, 3).value  # Type column
+            # Type column C: "Cap", "Ind", "Res", etc.
+            type_cell = ws.cell(r, 3).value
             type_str = str(type_cell or "").strip().lower()
             is_resistor_row = "res" in type_str
 
+            # Special case: keep 0 Ohm resistors as real parts
             is_zero_ohm = (
                 is_resistor_row and
                 numeric == "0" and
@@ -570,7 +642,7 @@ class LayoutApp:
         return bom, headers
 
     # ========================================================
-    # NUMERIC + UNIT HELPERS
+    # Numeric + unit extraction helpers
     # ========================================================
     def extract_numeric(self, raw):
         if raw in ["", None]:
@@ -607,7 +679,7 @@ class LayoutApp:
         return ""
 
     # ========================================================
-    # LOAD TUNING BOM (CSV)
+    # Load / save tuning BOM (CSV)
     # ========================================================
     def load_tuning_bom_csv(self):
         fp = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
@@ -637,6 +709,7 @@ class LayoutApp:
                     numeric = self.extract_numeric(raw_val)
                     unit = self.extract_unit(raw_val, explicit_unit=raw_unit)
 
+                    # Treat 0 as "no component" in tuning files
                     if numeric == "0":
                         numeric = ""
                         unit = ""
@@ -654,6 +727,7 @@ class LayoutApp:
         self.tuning_boms.append(tuning)
         self.tuning_bom_names.append(fp)
 
+        # Add radio button entry in sidebar
         idx = len(self.tuning_boms) - 1
         rb = tk.Radiobutton(
             self.tuning_buttons_frame,
@@ -669,9 +743,6 @@ class LayoutApp:
 
         messagebox.showinfo("Loaded", f"Tuning BOM loaded:\n{fp}")
 
-    # ========================================================
-    # SAVE TUNING BOM (CSV) — SAVE AS
-    # ========================================================
     def save_tuning_bom_csv(self):
         if not self.xy_data:
             messagebox.showerror("Error", "Load XY file first.")
@@ -690,7 +761,6 @@ class LayoutApp:
             writer.writerow(["ReferenceID", "X", "Y", "Angle", "Value", "Unit"])
 
             for ref, info in self.xy_data.items():
-                # Convert back using raw if available
                 if ref in self.raw_xy_data:
                     x_raw = self.raw_xy_data[ref]["x"]
                     y_raw = self.raw_xy_data[ref]["y"]
@@ -710,7 +780,7 @@ class LayoutApp:
         messagebox.showinfo("Saved", f"Tuning BOM saved:\n{save_path}")
 
     # ========================================================
-    # APPLY SELECTED TUNING BOM (SIDEBAR)
+    # Apply selected tuning BOM to layout
     # ========================================================
     def apply_selected_tuning_bom_sidebar(self):
         idx = self.tuning_var.get()
@@ -720,13 +790,16 @@ class LayoutApp:
 
         bom = self.tuning_boms[idx]
         for ref, info in self.xy_data.items():
+            if info.get("nc", False):
+                # Preserve explicit N/C overrides
+                continue
             if ref in bom:
                 info["value"] = bom[ref]["value"]
                 info["unit"] = bom[ref]["unit"]
         self.redraw()
 
     # ========================================================
-    # COMPARE TUNING BOM vs PRODUCTION
+    # Compare tuning BOM vs production BOM
     # ========================================================
     def compare_boms(self):
         if not self.production_bom:
@@ -756,10 +829,8 @@ class LayoutApp:
 
         tk.Button(win, text="Compare", command=do_compare).pack(pady=10)
 
-    # ========================================================
-    # SHOW TUNING vs PRODUCTION DIFFERENCES
-    # ========================================================
     def show_bom_vs_production(self, tuning_bom):
+        """Show only refs whose value/unit differ between tuning and production."""
         win = tk.Toplevel()
         win.title("Tuning vs Production Differences")
 
@@ -785,9 +856,11 @@ class LayoutApp:
             t_val = t.get("value", "")
             t_unit = t.get("unit", "")
 
+            # Only interested in tuning entries that exist
             if not (t_val or t_unit):
                 continue
 
+            # Only show non-matching value+unit rows
             if not values_match(p_val, p_unit, t_val, t_unit):
                 tree.insert(
                     "",
@@ -796,9 +869,79 @@ class LayoutApp:
                 )
 
     # ========================================================
-    # REDRAW CANVAS (AUTO-CENTERED)
+    # Compare tuning BOM vs tuning BOM
+    # ========================================================
+    def compare_tuning_boms(self):
+        if len(self.tuning_boms) < 2:
+            messagebox.showerror("Error", "Load at least two tuning BOMs.")
+            return
+
+        win = tk.Toplevel()
+        win.title("Compare Tuning BOMs")
+
+        names = [
+            f"Tuning {i + 1}: {self.tuning_bom_names[i]}"
+            for i in range(len(self.tuning_boms))
+        ]
+
+        tk.Label(win, text="Select BOM A:").pack()
+        selA = tk.StringVar()
+        comboA = ttk.Combobox(win, textvariable=selA, values=names, width=60)
+        comboA.pack()
+        comboA.current(0)
+
+        tk.Label(win, text="Select BOM B:").pack()
+        selB = tk.StringVar()
+        comboB = ttk.Combobox(win, textvariable=selB, values=names, width=60)
+        comboB.pack()
+        comboB.current(1)
+
+        def do_compare():
+            bomA = self.tuning_boms[comboA.current()]
+            bomB = self.tuning_boms[comboB.current()]
+            win.destroy()
+            self.show_tuning_difference_table(bomA, bomB)
+
+        tk.Button(win, text="Compare", command=do_compare).pack(pady=10)
+
+    def show_tuning_difference_table(self, bomA, bomB):
+        """Show only refs where tuning BOM A and B disagree (value+unit)."""
+        win = tk.Toplevel()
+        win.title("Tuning BOM Differences")
+
+        tree = ttk.Treeview(
+            win,
+            columns=("ref", "A_val", "A_unit", "B_val", "B_unit"),
+            show="headings",
+        )
+        tree.pack(fill="both", expand=True)
+
+        tree.heading("ref", text="Ref")
+        tree.heading("A_val", text="A Value")
+        tree.heading("A_unit", text="A Unit")
+        tree.heading("B_val", text="B Value")
+        tree.heading("B_unit", text="B Unit")
+
+        refs = sorted(set(bomA.keys()) | set(bomB.keys()))
+        for ref in refs:
+            A_val = bomA.get(ref, {}).get("value", "")
+            A_unit = bomA.get(ref, {}).get("unit", "")
+            B_val = bomB.get(ref, {}).get("value", "")
+            B_unit = bomB.get(ref, {}).get("unit", "")
+
+            # Only show non-matching rows
+            if not values_match(A_val, A_unit, B_val, B_unit):
+                tree.insert(
+                    "",
+                    "end",
+                    values=(ref, A_val, A_unit, B_val, B_unit),
+                )
+
+    # ========================================================
+    # Redraw canvas (auto-centered)
     # ========================================================
     def redraw(self):
+        """Clear and redraw all components based on xy_data."""
         self.canvas.delete("all")
 
         if not self.xy_data:
@@ -822,6 +965,12 @@ class LayoutApp:
             val = info.get("value", "")
             unit = info.get("unit", "")
             angle = info.get("angle", 0)
+            nc_flag = info.get("nc", False)
+
+            # N/C parts have empty value/unit and are always red (missing)
+            if nc_flag:
+                val = ""
+                unit = ""
 
             if val and not unit:
                 unit = self.auto_default_unit(ref, unit)
@@ -831,10 +980,12 @@ class LayoutApp:
 
             is_zero_ohm = (str(val).strip() == "0") and (str(unit).strip() == "Ohms")
 
+            # Missing value -> red (except 0 Ohm)
             if (val in ["", None]) and not is_zero_ohm:
                 highlight = "missing"
             else:
-                if self.production_bom and ref in self.production_bom:
+                # Only check production mismatch when not marked N/C
+                if self.production_bom and ref in self.production_bom and not nc_flag:
                     pval = self.production_bom[ref].get("value", "")
                     punit = self.production_bom[ref].get("unit", "")
                     if pval or punit:
@@ -855,11 +1006,12 @@ class LayoutApp:
                 unit=unit,
                 highlight=highlight,
                 box_scale=self.box_scale,
+                nc=nc_flag,
             )
 
 
 # ============================================================
-# APPLICATION ENTRY POINT
+# Application entry point
 # ============================================================
 
 if __name__ == "__main__":
