@@ -1,3 +1,4 @@
+import os
 import csv
 import math
 import tkinter as tk
@@ -28,12 +29,12 @@ class ComponentBox:
         ref       : reference designator string (e.g. 'L3')
         x, y      : canvas coordinates (already scaled/translated)
         angle     : rotation angle in degrees
-        comp_type : 'Capacitor', 'Inductor', etc. (not used visually yet)
+        comp_type : 'Capacitor', 'Inductor', etc.
         value     : normalized numeric value string (e.g. '2.5')
         unit      : normalized unit string (e.g. 'pF', 'Ohms')
         highlight : None / 'missing' / 'mismatch' (controls box color)
         box_scale : visual scaling factor for box/label size
-        nc        : True if this is intentionally marked 'No Component' (N/C)
+        nc        : True if this is intentionally 'No Component' (N/C)
         """
         self.canvas = canvas
         self.ref = ref
@@ -99,7 +100,6 @@ class ComponentBox:
         offset = 6 * self.box_scale
         side_offset = 12 * self.box_scale
 
-        # Place the label on a side that stays readable for common angles
         if 315 <= angle or angle < 45:
             lx, ly = self.x, self.y + h + offset
         elif 45 <= angle < 135:
@@ -157,6 +157,8 @@ class ComponentBox:
                     app.xy_data[self.ref]["unit"] = new_unit
                     app.xy_data[self.ref]["angle"] = new_angle
                     app.xy_data[self.ref]["nc"] = nc_flag
+                # Any manual edit creates/updates UNSAVED tuning BOM
+                app.update_unsaved_tuning_from_xy()
                 app.redraw()
                 app.refresh_production_tree()
             else:
@@ -211,9 +213,11 @@ class LayoutApp:
         self.xy_data = {}          # scaled coords + state for drawing
         self.raw_xy_data = {}      # original coords from XY CSV
         self.tuning_boms = []      # list of {ref: {value, unit}}
-        self.tuning_bom_names = [] # filenames for display
+        self.tuning_bom_names = [] # filenames or "UNSAVED"
         self.production_bom = None
         self.production_bom_headers = None
+
+        self.unsaved_tuning_index = None  # index in tuning_boms for UNSAVED, or None
 
         # Visual scale settings
         self.scale_factor = 100    # XY coordinate scale
@@ -265,7 +269,7 @@ class LayoutApp:
                   command=self.load_tuning_bom_csv).pack(fill="x", padx=5, pady=2)
         tk.Button(top, text="Save Tuning BOM (Save As)",
                   command=self.save_tuning_bom_csv).pack(fill="x", padx=5, pady=2)
-        tk.Button(top, text="Compare BOMs",
+        tk.Button(top, text="Compare Production and Tuning BOM",
                   command=self.compare_boms).pack(fill="x", padx=5, pady=2)
 
         # Clear buttons
@@ -274,7 +278,7 @@ class LayoutApp:
         tk.Button(sidebar, text="Clear Tuning BOMs", command=self.clear_tuning_boms).pack(fill="x", padx=5, pady=2)
         tk.Button(sidebar, text="Clear Production BOM", command=self.clear_production_bom).pack(fill="x", padx=5, pady=2)
 
-        # Tuning BOM list + actions
+        # Tuning BOMs
         tuning_frame = tk.LabelFrame(sidebar, text="Tuning BOMs")
         tuning_frame.pack(fill="both", expand=True, padx=5, pady=4)
 
@@ -336,6 +340,60 @@ class LayoutApp:
         self.redraw()
 
     # ========================================================
+    # Tuning list rebuild
+    # ========================================================
+    def rebuild_tuning_list(self):
+        """Rebuild tuning BOM radio buttons from tuning_bom_names."""
+        for child in self.tuning_buttons_frame.winfo_children():
+            child.destroy()
+
+        for i, path in enumerate(self.tuning_bom_names):
+            if path == "UNSAVED":
+                text = "UNSAVED"
+            else:
+                text = os.path.basename(path)
+            rb = tk.Radiobutton(
+                self.tuning_buttons_frame,
+                text=text,
+                variable=self.tuning_var,
+                value=i,
+                anchor="w",
+                justify="left"
+            )
+            rb.pack(fill="x", padx=2, pady=1)
+
+        if self.tuning_boms:
+            if self.tuning_var.get() < 0 or self.tuning_var.get() >= len(self.tuning_boms):
+                self.tuning_var.set(0)
+
+    # ========================================================
+    # UNSAVED tuning BOM support
+    # ========================================================
+    def update_unsaved_tuning_from_xy(self):
+        """
+        Snapshot current XY values into an 'UNSAVED' tuning BOM entry.
+        Lets user compare current edits even before saving to CSV.
+        """
+        bom = {}
+        for ref, info in self.xy_data.items():
+            if info.get("nc", False):
+                continue
+            val = str(info.get("value", "")).strip()
+            unit = str(info.get("unit", "")).strip()
+            if not val and not unit:
+                continue
+            bom[ref] = {"value": val, "unit": unit}
+
+        if self.unsaved_tuning_index is None:
+            self.tuning_boms.append(bom)
+            self.tuning_bom_names.append("UNSAVED")
+            self.unsaved_tuning_index = len(self.tuning_boms) - 1
+        else:
+            self.tuning_boms[self.unsaved_tuning_index] = bom
+
+        self.rebuild_tuning_list()
+
+    # ========================================================
     # Clear operations
     # ========================================================
     def clear_xy(self):
@@ -347,6 +405,7 @@ class LayoutApp:
         self.tuning_boms = []
         self.tuning_bom_names = []
         self.tuning_var.set(-1)
+        self.unsaved_tuning_index = None
         for child in self.tuning_buttons_frame.winfo_children():
             child.destroy()
         messagebox.showinfo("Cleared", "All tuning BOMs cleared.")
@@ -460,7 +519,6 @@ class LayoutApp:
         self.production_bom = bom
         self.production_bom_headers = headers
 
-        # Apply BOM values to current XY components (except N/C)
         for ref, info in self.xy_data.items():
             if ref in self.production_bom and not info.get("nc", False):
                 bval = self.production_bom[ref].get("value", "")
@@ -507,7 +565,6 @@ class LayoutApp:
         for c, header in enumerate(self.production_bom_headers, start=1):
             ws.cell(row=1, column=c, value=header)
 
-        # Try to preserve original columns
         try:
             col_ref = self.production_bom_headers.index("Reference Designator") + 1
         except ValueError:
@@ -593,10 +650,8 @@ class LayoutApp:
             val_cell = ws.cell(r, col_val).value
 
             if not ref_cell:
-                # Skip blank reference rows but continue to later rows
                 continue
 
-            # Split cell like "R4, R5" into separate refs
             refs = (
                 str(ref_cell)
                 .replace(";", ",")
@@ -610,12 +665,10 @@ class LayoutApp:
             numeric = self.extract_numeric(raw_val_str)
             inferred_unit = self.extract_unit(raw_val_str, explicit_unit="")
 
-            # Type column C: "Cap", "Ind", "Res", etc.
-            type_cell = ws.cell(r, 3).value
+            type_cell = ws.cell(r, 3).value  # Type column
             type_str = str(type_cell or "").strip().lower()
             is_resistor_row = "res" in type_str
 
-            # Special case: keep 0 Ohm resistors as real parts
             is_zero_ohm = (
                 is_resistor_row and
                 numeric == "0" and
@@ -709,7 +762,6 @@ class LayoutApp:
                     numeric = self.extract_numeric(raw_val)
                     unit = self.extract_unit(raw_val, explicit_unit=raw_unit)
 
-                    # Treat 0 as "no component" in tuning files
                     if numeric == "0":
                         numeric = ""
                         unit = ""
@@ -726,20 +778,7 @@ class LayoutApp:
 
         self.tuning_boms.append(tuning)
         self.tuning_bom_names.append(fp)
-
-        # Add radio button entry in sidebar
-        idx = len(self.tuning_boms) - 1
-        rb = tk.Radiobutton(
-            self.tuning_buttons_frame,
-            text=f"Tuning {idx + 1}",
-            variable=self.tuning_var,
-            value=idx,
-            anchor="w",
-            justify="left"
-        )
-        rb.pack(fill="x", padx=2, pady=1)
-        if self.tuning_var.get() == -1:
-            self.tuning_var.set(0)
+        self.rebuild_tuning_list()
 
         messagebox.showinfo("Loaded", f"Tuning BOM loaded:\n{fp}")
 
@@ -779,6 +818,11 @@ class LayoutApp:
 
         messagebox.showinfo("Saved", f"Tuning BOM saved:\n{save_path}")
 
+        # If there is an UNSAVED tuning entry, rename it to this path
+        if self.unsaved_tuning_index is not None:
+            self.tuning_bom_names[self.unsaved_tuning_index] = save_path
+            self.rebuild_tuning_list()
+
     # ========================================================
     # Apply selected tuning BOM to layout
     # ========================================================
@@ -791,11 +835,13 @@ class LayoutApp:
         bom = self.tuning_boms[idx]
         for ref, info in self.xy_data.items():
             if info.get("nc", False):
-                # Preserve explicit N/C overrides
                 continue
             if ref in bom:
                 info["value"] = bom[ref]["value"]
                 info["unit"] = bom[ref]["unit"]
+
+        # Applying a tuning BOM also creates/updates UNSAVED snapshot
+        self.update_unsaved_tuning_from_xy()
         self.redraw()
 
     # ========================================================
@@ -814,7 +860,8 @@ class LayoutApp:
 
         tk.Label(win, text="Select tuning BOM:").pack()
         names = [
-            f"Tuning {i + 1}: {self.tuning_bom_names[i]}"
+            os.path.basename(self.tuning_bom_names[i])
+            if self.tuning_bom_names[i] != "UNSAVED" else "UNSAVED"
             for i in range(len(self.tuning_boms))
         ]
         sel = tk.StringVar()
@@ -856,11 +903,9 @@ class LayoutApp:
             t_val = t.get("value", "")
             t_unit = t.get("unit", "")
 
-            # Only interested in tuning entries that exist
             if not (t_val or t_unit):
                 continue
 
-            # Only show non-matching value+unit rows
             if not values_match(p_val, p_unit, t_val, t_unit):
                 tree.insert(
                     "",
@@ -880,7 +925,8 @@ class LayoutApp:
         win.title("Compare Tuning BOMs")
 
         names = [
-            f"Tuning {i + 1}: {self.tuning_bom_names[i]}"
+            os.path.basename(self.tuning_bom_names[i])
+            if self.tuning_bom_names[i] != "UNSAVED" else "UNSAVED"
             for i in range(len(self.tuning_boms))
         ]
 
@@ -929,7 +975,6 @@ class LayoutApp:
             B_val = bomB.get(ref, {}).get("value", "")
             B_unit = bomB.get(ref, {}).get("unit", "")
 
-            # Only show non-matching rows
             if not values_match(A_val, A_unit, B_val, B_unit):
                 tree.insert(
                     "",
@@ -980,11 +1025,9 @@ class LayoutApp:
 
             is_zero_ohm = (str(val).strip() == "0") and (str(unit).strip() == "Ohms")
 
-            # Missing value -> red (except 0 Ohm)
             if (val in ["", None]) and not is_zero_ohm:
                 highlight = "missing"
             else:
-                # Only check production mismatch when not marked N/C
                 if self.production_bom and ref in self.production_bom and not nc_flag:
                     pval = self.production_bom[ref].get("value", "")
                     punit = self.production_bom[ref].get("unit", "")
