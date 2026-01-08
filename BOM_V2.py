@@ -37,7 +37,6 @@ class Board:
         board = cls(path)
         with open(path, newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
-            # columns: ReferenceID, X, Y, Angle, V0, V1, ...
             if not reader.fieldnames:
                 return board
 
@@ -57,7 +56,6 @@ class Board:
 
                 board.xy[ref] = {"x": x, "y": y, "angle": angle}
 
-                # Ensure versions list length matches version_cols
                 while len(board.versions) < len(version_cols):
                     board.versions.append({})
 
@@ -68,7 +66,7 @@ class Board:
                     vdict = board.versions[idx]
                     vdict.setdefault(ref, {"value": "", "unit": ""})
                     vdict[ref]["value"] = raw
-                    vdict[ref]["unit"] = ""  # unitless string for now
+                    vdict[ref]["unit"] = ""
 
         return board
 
@@ -225,7 +223,7 @@ class ProductionBOM:
 
 
 # ============================================================
-# Component box widget
+# Component box widget (with left + right click)
 # ============================================================
 
 class ComponentBox:
@@ -311,10 +309,76 @@ class ComponentBox:
     def bind_events(self):
         for tag in (self.rect, self.label):
             self.canvas.tag_bind(tag, "<Button-1>", self.left_click)
+            self.canvas.tag_bind(tag, "<Button-3>", self.right_click)
 
     def left_click(self, event):
         if self.on_left_click:
             self.on_left_click(self.ref)
+
+    def right_click(self, event):
+        """Popup editor for value/unit/angle and N/C."""
+        popup = tk.Toplevel()
+        popup.title(f"Edit {self.ref}")
+
+        tk.Label(popup, text=f"Reference: {self.ref}").pack(pady=5)
+
+        tk.Label(popup, text="Value:").pack()
+        val_entry = tk.Entry(popup)
+        val_entry.insert(0, self.value)
+        val_entry.pack()
+
+        tk.Label(popup, text="Unit:").pack()
+        unit_box = ttk.Combobox(
+            popup,
+            values=["", "pF", "nF", "uF", "pH", "nH", "Ohms"]
+        )
+        unit_box.set(self.unit)
+        unit_box.pack()
+
+        tk.Label(popup, text="Angle:").pack()
+        ang_entry = tk.Entry(popup)
+        ang_entry.insert(0, str(self.angle))
+        ang_entry.pack()
+
+        def save_common(new_value, new_unit, new_angle, nc_flag):
+            self.value = new_value
+            self.unit = new_unit
+            self.angle = new_angle
+            self.nc = nc_flag
+
+            app = getattr(self.canvas, "app_ref", None)
+            if app is not None and hasattr(app, "xy_data"):
+                if self.ref in app.xy_data:
+                    app.xy_data[self.ref]["value"] = new_value
+                    app.xy_data[self.ref]["unit"] = new_unit
+                    app.xy_data[self.ref]["angle"] = new_angle
+                    app.xy_data[self.ref]["nc"] = nc_flag
+                app.redraw()
+
+        def save():
+            try:
+                new_value = val_entry.get()
+                new_unit = unit_box.get()
+                new_angle = float(ang_entry.get())
+            except ValueError:
+                messagebox.showerror("Error", "Angle must be a number.")
+                return
+            save_common(new_value, new_unit, new_angle, nc_flag=False)
+            popup.destroy()
+
+        def set_nc():
+            try:
+                new_angle = float(ang_entry.get())
+            except ValueError:
+                new_angle = self.angle
+            save_common("", "", new_angle, nc_flag=True)
+            popup.destroy()
+
+        btn_frame = tk.Frame(popup)
+        btn_frame.pack(pady=10, fill="x")
+
+        tk.Button(btn_frame, text="Save", command=save).pack(side="left", padx=5)
+        tk.Button(btn_frame, text="N/C", command=set_nc).pack(side="left", padx=5)
 
 
 # ============================================================
@@ -326,23 +390,21 @@ class LayoutAppV2:
         self.root = root
         self.root.title("Chipset BOM + XY Layout Tool v2")
 
-        self.xy_data = {}          # scaled coords + state
-        self.raw_xy_data = {}      # original coords from XY CSV
+        self.xy_data = {}
+        self.raw_xy_data = {}
 
-        self.current_board = None  # Board instance
-        self.current_board_version = None  # index into board.versions
+        self.current_board = None
+        self.current_board_version = None
 
         self.production_bom = None
 
         self.scale_factor = 100
         self.box_scale = 1.5
 
-        # Side-panel detail vars
         self.detail_tol_var = tk.StringVar(value="")
         self.detail_size_var = tk.StringVar(value="")
         self.detail_rate_var = tk.StringVar(value="")
 
-        # Menu
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
 
@@ -362,6 +424,7 @@ class LayoutAppV2:
 
         self.canvas = tk.Canvas(main, bg="white")
         self.canvas.pack(side="left", fill="both", expand=True)
+        self.canvas.app_ref = self
 
         sidebar = tk.Frame(main)
         sidebar.pack(side="right", fill="y")
@@ -384,7 +447,6 @@ class LayoutAppV2:
         tk.Button(top, text="Compare Board Versions",
                   command=self.compare_board_versions).pack(fill="x", padx=5, pady=2)
 
-        # Production BOM view
         prod_frame = tk.LabelFrame(sidebar, text="Production BOM")
         prod_frame.pack(fill="both", expand=True, padx=5, pady=4)
 
@@ -406,7 +468,6 @@ class LayoutAppV2:
         tk.Button(prod_frame, text="Refresh View",
                   command=self.refresh_production_tree).pack(fill="x", pady=2)
 
-        # Component details panel
         details_frame = tk.LabelFrame(sidebar, text="Component Details")
         details_frame.pack(fill="x", padx=5, pady=4)
 
@@ -530,7 +591,6 @@ class LayoutAppV2:
             messagebox.showerror("Error", str(e))
             return
 
-        # apply value/unit to XY
         for ref, info in self.xy_data.items():
             entry = self.production_bom.entries.get(ref)
             if entry:
@@ -589,7 +649,6 @@ class LayoutAppV2:
         self.current_board = board
         self.current_board_version = 0 if board.versions else None
 
-        # merge XY from board into xy_data
         self.raw_xy_data = {}
         self.xy_data = {}
         for ref, coords in board.xy.items():
@@ -609,7 +668,6 @@ class LayoutAppV2:
                 "nc": False,
             }
 
-        # apply selected version (if any)
         if self.current_board_version is not None:
             ver = self.current_board.versions[self.current_board_version]
             for ref, info in self.xy_data.items():
