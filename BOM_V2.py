@@ -1,8 +1,10 @@
 import os
 import csv
 import math
+import re
+from datetime import datetime
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 from openpyxl import load_workbook, Workbook
 
 
@@ -31,6 +33,7 @@ class Board:
         self.xy = {}          # ref -> {x, y, angle}
         self.versions = []    # list of dicts: [{ref: {value, unit}}, ...]
         self.version_names = []  # e.g. ["V0", "V1", ...]
+        self.version_meta = []  # list of {timestamp, notes}
 
     @classmethod
     def load_from_csv(cls, path):
@@ -70,7 +73,131 @@ class Board:
 
         return board
 
-    def append_version_from_xy(self, xy_data):
+    @staticmethod
+    def _normalize_unit(raw_unit):
+        unit_map = {
+            "pf": "pF",
+            "nf": "nF",
+            "uf": "uF",
+            "ohms": "Ohms",
+            "ohm": "Ohms",
+            "r": "Ohms",
+            "nh": "nH",
+            "uh": "uH",
+        }
+        key = str(raw_unit or "").strip().lower()
+        return unit_map.get(key, raw_unit)
+
+    @classmethod
+    def _split_value_unit(cls, raw):
+        if raw in ["", None]:
+            return "", ""
+        s = str(raw).strip()
+        if not s:
+            return "", ""
+        match = re.match(r"^\s*([0-9]*\.?[0-9]+)\s*([a-zA-Zμ]*)\s*$", s)
+        if match:
+            value = match.group(1)
+            unit = cls._normalize_unit(match.group(2))
+            return value, unit
+        value = "".join(ch for ch in s if ch.isdigit() or ch == ".")
+        unit = s.replace(value, "").strip()
+        unit = cls._normalize_unit(unit)
+        return value, unit
+
+    @staticmethod
+    def _join_value_unit(value, unit):
+        value = str(value or "").strip()
+        unit = str(unit or "").strip()
+        if not value:
+            return ""
+        if unit:
+            return f"{value}{unit}"
+        return value
+
+    @classmethod
+    def load_from_xlsx(cls, path):
+        board = cls(path)
+        wb = load_workbook(path, data_only=True)
+        ws = wb.active
+
+        headers = [
+            (idx + 1, str(ws.cell(1, idx + 1).value or "").strip())
+            for idx in range(ws.max_column)
+        ]
+        header_map = {name.lower(): col for col, name in headers if name}
+
+        ref_col = header_map.get("referenceid") or header_map.get("reference id") or header_map.get("ref") or 1
+        x_col = header_map.get("x") or 2
+        y_col = header_map.get("y") or 3
+        angle_col = header_map.get("angle") or 4
+
+        version_columns = {}
+        for col, name in headers:
+            if not name:
+                continue
+            base_match = re.match(r"^(v\d+)(?:_(timestamp|notes))?$", name.strip(), re.IGNORECASE)
+            if not base_match:
+                continue
+            base = base_match.group(1).upper()
+            suffix = (base_match.group(2) or "value").lower()
+            version_columns.setdefault(base, {"value": None, "timestamp": None, "notes": None})
+            version_columns[base][suffix] = col
+
+        ordered_versions = []
+        for col, name in headers:
+            if not name:
+                continue
+            if re.match(r"^v\d+$", name.strip(), re.IGNORECASE):
+                ordered_versions.append(name.strip().upper())
+
+        board.version_names = ordered_versions[:]
+        board.versions = [{} for _ in board.version_names]
+        board.version_meta = [{"timestamp": "", "notes": ""} for _ in board.version_names]
+
+        meta_found = [False for _ in board.version_names]
+        for row in range(2, ws.max_row + 1):
+            ref_cell = ws.cell(row, ref_col).value
+            if not ref_cell:
+                continue
+            ref = str(ref_cell).strip()
+            try:
+                x = float(ws.cell(row, x_col).value)
+                y = float(ws.cell(row, y_col).value)
+            except (TypeError, ValueError):
+                continue
+            angle_raw = ws.cell(row, angle_col).value
+            try:
+                angle = float(angle_raw) if angle_raw is not None else 0.0
+            except (TypeError, ValueError):
+                angle = 0.0
+
+            board.xy[ref] = {"x": x, "y": y, "angle": angle}
+
+            for idx, ver_name in enumerate(board.version_names):
+                cols = version_columns.get(ver_name, {})
+                value_col = cols.get("value")
+                if value_col:
+                    raw_val = ws.cell(row, value_col).value
+                    if raw_val not in ["", None]:
+                        value, unit = cls._split_value_unit(raw_val)
+                        board.versions[idx].setdefault(ref, {"value": "", "unit": ""})
+                        board.versions[idx][ref]["value"] = value
+                        board.versions[idx][ref]["unit"] = unit
+
+                if not meta_found[idx]:
+                    ts_col = cols.get("timestamp")
+                    notes_col = cols.get("notes")
+                    ts_val = ws.cell(row, ts_col).value if ts_col else ""
+                    notes_val = ws.cell(row, notes_col).value if notes_col else ""
+                    if ts_val or notes_val:
+                        board.version_meta[idx]["timestamp"] = str(ts_val or "")
+                        board.version_meta[idx]["notes"] = str(notes_val or "")
+                        meta_found[idx] = True
+
+        return board
+
+    def append_version_from_xy(self, xy_data, timestamp, notes):
         """
         Create a new version Vn from current xy_data values.
         Only refs with non-empty value/unit are stored.
@@ -86,6 +213,7 @@ class Board:
             bom[ref] = {"value": val, "unit": unit}
         self.versions.append(bom)
         self.version_names.append(f"V{len(self.versions) - 1}")
+        self.version_meta.append({"timestamp": timestamp, "notes": notes})
 
     def save_to_csv(self):
         """
@@ -118,6 +246,44 @@ class Board:
                         val = v.get("value", "")
                     row[col] = val
                 writer.writerow(row)
+
+    def save_to_xlsx(self):
+        if not self.xy:
+            return
+
+        if not self.version_names:
+            self.version_names = [f"V{i}" for i in range(len(self.versions))]
+
+        wb = Workbook()
+        ws = wb.active
+
+        headers = ["ReferenceID", "X", "Y", "Angle"]
+        for idx, name in enumerate(self.version_names):
+            headers.extend([
+                name,
+                f"{name}_Timestamp",
+                f"{name}_Notes",
+            ])
+
+        ws.append(headers)
+        refs = sorted(self.xy.keys())
+        for ref in refs:
+            row = [
+                ref,
+                self.xy[ref]["x"],
+                self.xy[ref]["y"],
+                self.xy[ref]["angle"],
+            ]
+            for idx, name in enumerate(self.version_names):
+                version = self.versions[idx] if idx < len(self.versions) else {}
+                val = ""
+                if ref in version:
+                    val = self._join_value_unit(version[ref].get("value", ""), version[ref].get("unit", ""))
+                meta = self.version_meta[idx] if idx < len(self.version_meta) else {"timestamp": "", "notes": ""}
+                row.extend([val, meta.get("timestamp", ""), meta.get("notes", "")])
+            ws.append(row)
+
+        wb.save(self.path)
 
 
 # ============================================================
@@ -439,8 +605,10 @@ class LayoutAppV2:
         tk.Button(top, text="Export Production BOM",
                   command=self.export_production_bom).pack(fill="x", padx=5, pady=2)
 
-        tk.Button(top, text="Load Board CSV (V0/V1/...)",
-                  command=self.load_board_csv).pack(fill="x", padx=5, pady=2)
+        tk.Button(top, text="Create Board",
+                  command=self.create_board).pack(fill="x", padx=5, pady=2)
+        tk.Button(top, text="Load Board (XLSX)",
+                  command=self.load_board_xlsx).pack(fill="x", padx=5, pady=2)
         tk.Button(top, text="Save New Board Version",
                   command=self.save_new_board_version).pack(fill="x", padx=5, pady=2)
 
@@ -636,12 +804,67 @@ class LayoutAppV2:
 
     # ---------------------- board versions -------------------
 
-    def load_board_csv(self):
-        fp = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
+    def _get_raw_coords_for_board(self):
+        if self.raw_xy_data:
+            return {
+                ref: {
+                    "x": raw["x"],
+                    "y": raw["y"],
+                    "angle": raw.get("angle", 0),
+                }
+                for ref, raw in self.raw_xy_data.items()
+            }
+        data = {}
+        for ref, info in self.xy_data.items():
+            data[ref] = {
+                "x": info["x"] / self.scale_factor,
+                "y": info["y"] / self.scale_factor,
+                "angle": info.get("angle", 0),
+            }
+        return data
+
+    def create_board(self):
+        if not self.xy_data:
+            messagebox.showerror("Error", "Load an XY file first.")
+            return None
+
+        board_name = simpledialog.askstring("Create Board", "Board name:")
+        if not board_name:
+            return None
+
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel Files", "*.xlsx")],
+            title="Create Board",
+            initialfile=f"{board_name}.xlsx",
+        )
+        if not save_path:
+            return None
+
+        board = Board(save_path)
+        raw_coords = self._get_raw_coords_for_board()
+        board.xy = raw_coords
+        board.versions = []
+        board.version_names = []
+        board.version_meta = []
+        try:
+            board.save_to_xlsx()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to create board:\n{e}")
+            return None
+
+        self.current_board = board
+        self.current_board_version = None
+
+        messagebox.showinfo("Created", f"Board created: {board.name}")
+        return board
+
+    def load_board_xlsx(self):
+        fp = filedialog.askopenfilename(filetypes=[("Excel Files", "*.xlsx")])
         if not fp:
             return
         try:
-            board = Board.load_from_csv(fp)
+            board = Board.load_from_xlsx(fp)
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load board:\n{e}")
             return
@@ -683,12 +906,26 @@ class LayoutAppV2:
 
     def save_new_board_version(self):
         if not self.current_board:
-            messagebox.showerror("Error", "Load a board CSV first.")
-            return
+            create = messagebox.askyesno(
+                "Create Board",
+                "No board loaded. Create a new board?"
+            )
+            if create:
+                if not self.create_board():
+                    return
+            else:
+                return
 
-        self.current_board.append_version_from_xy(self.xy_data)
+        notes = simpledialog.askstring(
+            "Version Notes",
+            "Notes for this tuning version (optional):"
+        )
+        notes = notes or ""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        self.current_board.append_version_from_xy(self.xy_data, timestamp, notes)
         try:
-            self.current_board.save_to_csv()
+            self.current_board.save_to_xlsx()
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save board:\n{e}")
             return
@@ -747,8 +984,10 @@ class LayoutAppV2:
 
         refs = sorted(set(bomA.keys()) | set(bomB.keys()))
         for ref in refs:
-            A_val = bomA.get(ref, {}).get("value", "")
-            B_val = bomB.get(ref, {}).get("value", "")
+            A_entry = bomA.get(ref, {})
+            B_entry = bomB.get(ref, {})
+            A_val = Board._join_value_unit(A_entry.get("value", ""), A_entry.get("unit", ""))
+            B_val = Board._join_value_unit(B_entry.get("value", ""), B_entry.get("unit", ""))
             if A_val != B_val:
                 tree.insert("", "end", values=(ref, A_val, B_val))
 
@@ -800,6 +1039,11 @@ class LayoutAppV2:
             val = info.get("value", "")
             unit = info.get("unit", "")
             angle = info.get("angle", 0)
+            nc_flag = info.get("nc", False)
+
+            if nc_flag:
+                val = ""
+                unit = ""
 
             if val and not unit:
                 unit = self.auto_default_unit(ref, unit)
@@ -808,6 +1052,15 @@ class LayoutAppV2:
             highlight = None
             if val in ["", None]:
                 highlight = "missing"
+            else:
+                if self.production_bom and not nc_flag:
+                    entry = self.production_bom.entries.get(ref)
+                    if entry:
+                        pval = entry.get("value", "")
+                        punit = entry.get("unit", "")
+                        if pval or punit:
+                            if not values_match(val, unit, pval, punit):
+                                highlight = "mismatch"
 
             draw_x = info["x"] + offset_x
             draw_y = info["y"] + offset_y
@@ -823,7 +1076,7 @@ class LayoutAppV2:
                 unit=unit,
                 highlight=highlight,
                 box_scale=self.box_scale,
-                nc=False,
+                nc=nc_flag,
                 on_left_click=self.on_component_clicked,
             )
 
